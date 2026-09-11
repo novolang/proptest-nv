@@ -1,0 +1,165 @@
+// casefile.nv — the persisted failure file, which is the one optional
+// host feature and is off by default.
+//
+// WHAT IT IS FOR.  A property that failed once should fail again on
+// the next run without waiting for the generator to rediscover it.
+// proptest writes a `.proptest-regressions` file; hypothesis keeps a
+// `.hypothesis` database.  Both do it by default and both surprise
+// people: a file appears in a repository nobody added, a build agent's
+// cache decides which cases run, and a test that "passes on my
+// machine" passes because of a file that is not in the checkout.
+//
+// SO IT IS OFF.  `PropConfig.case_file` is `None` in `defaults()`, and
+// a program that wants the corpus names the path itself — which also
+// means the path is in the program's own source, where a reader can
+// see it, rather than invented by a library.
+//
+// THE FORMAT IS ONE CASE PER LINE, in `propcheck.replay_line`'s
+// spelling — the same text a failure report prints and a person
+// pastes back.  One format, three uses: the log line, the file, and
+// the argument to `runner.replay`.  A line that does not parse is
+// SKIPPED with the file otherwise intact, because a corpus is a cache
+// and a corrupt cache should not stop a test run.
+//
+// THE ROW IS `[fs]` and nothing else.  No `[io]`: this writes a file,
+// it does not print, and a library does not decide that something
+// appears on a console.
+
+// One recorded case.
+//
+// ```novo
+// use casefile
+//
+// fn main() [io]
+//     let c = SavedCase { seed: 42, choices: [3, 1, 4], why: "not an involution" }
+//     println("${c.seed}")
+// ```
+pub struct SavedCase
+    // The seed the run that found it started from.
+    seed: Int
+    // The minimal transcript, which is what `runner.replay` takes.
+    choices: [Int]
+    // What the property said was wrong, kept so a corpus reads as a
+    // list of known bugs rather than a list of numbers.
+    why: Str
+
+// Why a case file could not be read or written.
+//
+// ```novo
+// use casefile
+//
+// fn main() [io]
+//     println(casefile.case_fault_path(CaseUnreadable("/x", "denied")))
+// ```
+pub enum CaseFileFault
+    // The file exists and could not be read.  A file that is simply
+    // ABSENT is not a fault — `load_cases` returns an empty list —
+    // because a corpus that has not been started yet is the ordinary
+    // state.
+    CaseUnreadable(path: Str, why: Str)
+    // The file could not be written.
+    CaseWriteFailed(path: Str, why: Str)
+    // The directory the file lives in could not be made.
+    CaseDirFailed(path: Str, why: Str)
+
+// The reason, as one line of text.
+//
+// The `Error` trait's method, which is what `Result<_, CaseFileFault>`
+// requires.
+impl Error for CaseFileFault
+    // Panics with `not implemented` until the bodies land.
+    fn message(self) -> Str
+        todo("proptest-nv.CaseFileFault.message")
+
+// The path a fault is about.
+//
+// ```novo
+// use casefile
+//
+// fn main() [io]
+//     println(casefile.case_fault_path(CaseWriteFailed("/x", "full")))
+// ```
+pub fn case_fault_path(f: CaseFileFault) -> Str
+    todo("proptest-nv.casefile.case_fault_path")
+
+// The cases a file holds, oldest first.
+//
+// An absent file is an empty list, not a fault.  A line that does not
+// parse is skipped and counted by `bad_lines` rather than failing the
+// read, because a corpus is a cache.
+//
+// ```novo
+// use casefile
+// use std.list
+//
+// fn known(path: Str) -> Int [fs]
+//     match casefile.load_cases(path)
+//         Ok(cs) => list.len(cs)
+//         Err(_) => 0 - 1
+// ```
+pub fn load_cases(path: Str) -> Result<[SavedCase], CaseFileFault> [fs]
+    todo("proptest-nv.casefile.load_cases")
+
+// Append one case, creating the file and its directory if needed.
+//
+// Appends rather than replaces: a corpus is a list of bugs this
+// property has had, and a run that found a second one should not lose
+// the first.  A case whose transcript is already in the file is not
+// written twice.
+//
+// Returns how many cases the file holds afterwards.
+//
+// ```novo
+// use casefile
+//
+// fn remember(path: Str, c: SavedCase) -> Result<Int, CaseFileFault> [fs]
+//     casefile.record(path, c)
+// ```
+pub fn record(path: Str, c: SavedCase) -> Result<Int, CaseFileFault> [fs]
+    todo("proptest-nv.casefile.record")
+
+// How many lines of a file did not parse.
+//
+// So a program can say "your corpus has three lines I could not read"
+// rather than silently running fewer cases than the file suggests.
+//
+// ```novo
+// use casefile
+//
+// fn main() [fs, io]
+//     println("${casefile.bad_lines(".proptest/reverse")}")
+// ```
+pub fn bad_lines(path: Str) -> Int [fs]
+    todo("proptest-nv.casefile.bad_lines")
+
+// A file's cases as text, in the format `load_cases` reads.
+//
+// **Returns the text; it does not write it.**  For a program that
+// wants the corpus in its own output — a failure summary, a comment on
+// a pull request — without a second serialiser to keep in step.
+//
+// ```novo
+// use casefile
+//
+// fn main() [io]
+//     let c = SavedCase { seed: 42, choices: [3, 1], why: "too long" }
+//     println(casefile.render_cases([c]))
+// ```
+pub fn render_cases(cs: [SavedCase]) -> Str
+    todo("proptest-nv.casefile.render_cases")
+
+// Cases back out of text.  **No effects.**
+//
+// The inverse of `render_cases`, and what `load_cases` is written on
+// top of — so the grammar is testable against a fixture string with no
+// file on disk.
+//
+// ```novo
+// use casefile
+// use std.list
+//
+// fn count(text: Str) -> Int
+//     list.len(casefile.parse_cases(text))
+// ```
+pub fn parse_cases(text: Str) -> [SavedCase]
+    todo("proptest-nv.casefile.parse_cases")

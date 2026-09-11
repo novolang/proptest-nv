@@ -1,0 +1,51 @@
+[package]
+name        = "proptest-nv"
+version     = "0.0.1"
+description = "The property-test runner: N cases from a seed the caller gives or the operating system draws, the first failure shrunk to its minimal case, and a report that is a value carrying the seed that reproduces it — reported through std.test so a property failure reads like every other test failure."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `host`, and the rows are narrow on purpose.  `[fs, rand]` is the seed
+# draw, and it is `[fs]` because the operating system's entropy is a
+# file on the platforms this runs on — rand-nv's `os_u64` declares
+# both.  `replay` declares NOTHING: reproducing a recorded case needs
+# neither entropy nor a clock, which is what makes a failure
+# investigable in a sandbox that grants nothing.
+layer       = "host"
+
+category    = "testing"
+
+tags        = ["proptest", "property", "quickcheck", "hypothesis", "shrinking", "testing", "seed"]
+repository  = "https://github.com/novolang/proptest-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "Running properties and reporting the minimal case"
+
+[dependencies]
+# The `core` half of the split, and the direction the layer order
+# allows.
+#
+# A PATH while the two are developed together.  The coordinator
+# converts this to `proptest-core-nv = "^0.0.1"` before publish — a
+# path dependency is refused by `novo pkg publish`, `--dry-run`
+# included, because the tarball would carry the path and send every
+# consumer to a directory that is not on their machine.
+proptest-core-nv = "^0.0.1"
+
+# The seed draw, and the ONLY thing randomness is used for here:
+# `rand.os_u64()` picks the integer, and every case, every shrink and
+# every replay after that is a function of it.  rand-nv is an
+# implemented package, not an interface, so this dependency works
+# today.
+rand-nv = "^0.1.4"

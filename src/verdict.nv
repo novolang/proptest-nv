@@ -1,0 +1,110 @@
+// verdict.nv — what a run says when it is over.
+//
+// The CONFIGURATION lives in `runner`, beside the functions that read
+// it; this module is the answer, not the question.
+//
+// THREE VERDICTS, NOT TWO.  A run that finished its cases passed; a
+// run that found a counterexample failed; and a run that could not
+// generate enough usable cases is EXHAUSTED, which is neither.  The
+// third one is the diagnosis a person needs when a `filter` is too
+// tight or an `assumed` is never true: "your generator does not
+// produce the values your property is about" is a different problem
+// from "your property is wrong", and a runner that reported it as a
+// pass would hide it entirely.
+//
+// A VERDICT IS A VALUE.  Nothing here prints, and the rendering
+// functions RETURN text.  `runner.check_test` is the one place a
+// message reaches a person, and it goes through `std.test` so a
+// property failure reads like every other test failure.
+//
+// EVERY VERDICT CARRIES THE SEED, pass included.  A run that passed
+// today and fails tomorrow is worth re-running at yesterday's seed,
+// and a seed nobody recorded is a seed nobody has.
+
+// What a run concluded.
+//
+// ```novo
+// use verdict
+//
+// fn describe(v: PropVerdict<Int>) -> Str
+//     verdict.verdict_name(v)
+// ```
+pub enum PropVerdict<T>
+    // Every case held.  `cases` is how many ran, `seed` is what they
+    // ran from — recorded even on a pass, because a run worth
+    // repeating is a run whose seed somebody kept.
+    PropPassed(cases: Int, seed: Int)
+    // A case broke the property, and this is the minimal one.
+    PropFailed(failure: PropFailure<T>)
+    // Too many cases were skipped or discarded to conclude anything.
+    // `ran` is how many actually reached the property; `skipped` is
+    // how many did not.
+    PropExhausted(ran: Int, skipped: Int, seed: Int)
+
+// The name of a verdict: `"passed"`, `"failed"`, `"exhausted"`.
+//
+// ```novo
+// use verdict
+//
+// fn describe(v: PropVerdict<Int>) -> Str
+//     verdict.verdict_name(v)
+// ```
+pub fn verdict_name<T>(v: PropVerdict<T>) -> Str
+    todo("proptest-nv.verdict.verdict_name")
+
+// Whether a verdict is a pass.
+//
+// `PropExhausted` is **false**: a run that could not generate usable
+// cases has not established anything, and a caller that treated it as
+// a pass would be exactly the caller this verdict exists to warn.
+//
+// ```novo
+// use verdict
+//
+// fn ok(v: PropVerdict<Int>) -> Bool
+//     verdict.held(v)
+// ```
+pub fn held<T>(v: PropVerdict<T>) -> Bool
+    todo("proptest-nv.verdict.held")
+
+// The seed behind any verdict.
+//
+// ```novo
+// use verdict
+//
+// fn which_seed(v: PropVerdict<Int>) -> Int
+//     verdict.seed_of(v)
+// ```
+pub fn seed_of<T>(v: PropVerdict<T>) -> Int
+    todo("proptest-nv.verdict.seed_of")
+
+// The failure inside a `PropFailed`, or `None`.
+//
+// ```novo
+// use verdict
+//
+// fn why(v: PropVerdict<Int>) -> Str
+//     match verdict.failure_of(v)
+//         Some(f) => f.why
+//         None    => "nothing broke"
+// ```
+pub fn failure_of<T>(v: PropVerdict<T>) -> ?PropFailure<T>
+    todo("proptest-nv.verdict.failure_of")
+
+// A verdict as the message a person reads, without the value.
+//
+// **Returns the text; it does not print it.**  The value is left out
+// because `T` is generic and has no universal spelling in this
+// language — `runner.check_test` takes a renderer for that, and this
+// is the half that needs none.  What it carries is the seed and the
+// transcript, in `propcheck.replay_line`'s spelling, so that the line
+// a build log shows is the line a person pastes back.
+//
+// ```novo
+// use verdict
+//
+// fn report(v: PropVerdict<Int>) -> Str
+//     verdict.render(v)
+// ```
+pub fn render<T>(v: PropVerdict<T>) -> Str
+    todo("proptest-nv.verdict.render")

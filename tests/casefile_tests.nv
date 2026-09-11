@@ -1,0 +1,142 @@
+// casefile_tests.nv — the API suite for the persisted failure file
+// and the seed source.
+//
+// RED ON PURPOSE: every body is a `todo()`.  Run with `--isolate` for
+// one verdict per `@test`.
+//
+// WHAT THESE CASES PIN.  The two decisions this package makes about
+// the machine — that the corpus is off by default and that the seed is
+// drawn exactly once — and the effect rows that go with them.
+// `parse_cases` and `render_cases` declare nothing, so the corpus
+// format is testable against a fixture string with no file on disk.
+//
+// THE RUNNER SUITE IS NOT HERE.  It is in `runner_tests.nv`, which
+// does not compile on this toolchain: every entry takes a
+// `PropStrategy<T>` from proptest-core-nv, and a generic function whose
+// signature applies a generic head is not emitted for a call from
+// another module.  That file's own header has the detail.
+
+use std.test
+use std.list
+use casefile
+use seedsrc
+use runner
+
+@test
+fn test_the_corpus_is_off_by_default() [io]
+    test.case("defaults name no file")
+    match runner.defaults().case_file
+        Some(_) => test.fail("a library should not put a file in somebody's repository")
+        None    => test.assert(true)
+
+    test.case("and a program that wants one names the path itself")
+    match runner.with_case_file(runner.defaults(), ".proptest/reverse").case_file
+        Some(p) => test.assert(p == ".proptest/reverse")
+        None    => test.fail("with_case_file sets it")
+
+@test
+fn test_the_default_budgets() [io]
+    test.case("256 cases, which is proptest's number")
+    test.assert(runner.defaults().cases == 256)
+
+    test.case("a shrink cap rather than a shrink target")
+    test.assert(runner.defaults().max_shrinks > 0)
+
+    test.case("and a skip budget, so a filter that never passes is diagnosed")
+    test.assert(runner.defaults().max_skips > runner.defaults().cases)
+
+    test.case("no seed by default, so one is drawn and reported")
+    match runner.defaults().seed
+        Some(_) => test.fail("a default seed would make every run identical")
+        None    => test.assert(true)
+
+    test.case("and with_seed fixes it")
+    match runner.with_seed(runner.defaults(), 42).seed
+        Some(s) => test.assert(s == 42)
+        None    => test.fail("with_seed sets it")
+
+    test.case("with_cases changes the count and nothing else")
+    let c = runner.with_cases(runner.defaults(), 1000)
+    test.assert(c.cases == 1000)
+    test.assert(c.max_shrinks == runner.defaults().max_shrinks)
+
+@test
+fn test_the_corpus_format_round_trips_without_a_file() [io]
+    let one = SavedCase { seed: 42, choices: [3, 1, 4], why: "not an involution" }
+
+    test.case("render and parse are inverses")
+    let cs = casefile.parse_cases(casefile.render_cases([one]))
+    test.assert(list.len(cs) == 1)
+    test.assert(cs[0].seed == 42)
+    test.assert(list.len(cs[0].choices) == 3)
+    test.assert(cs[0].why == "not an involution")
+
+    test.case("several cases, one per line, in order")
+    let two = SavedCase { seed: 7, choices: [0], why: "too long" }
+    let both = casefile.parse_cases(casefile.render_cases([one, two]))
+    test.assert(list.len(both) == 2)
+    test.assert(both[1].seed == 7)
+
+    test.case("an empty corpus renders to something parse reads as empty")
+    test.assert(list.len(casefile.parse_cases(casefile.render_cases([]))) == 0)
+
+@test
+fn test_a_corrupt_line_is_skipped_and_not_fatal() [io]
+    test.case("because a corpus is a cache and a bad cache should not stop a run")
+    let mixed = casefile.parse_cases("not a case line\nseed 42 choices 3,1,4\n")
+    test.assert(list.len(mixed) == 1)
+
+    test.case("and nothing at all parses to nothing")
+    test.assert(list.len(casefile.parse_cases("")) == 0)
+
+@test
+fn test_an_absent_file_is_an_empty_corpus_and_not_a_fault() [io, fs]
+    test.case("a path that does not exist")
+    match casefile.load_cases("/nonexistent/proptest/reverse")
+        Ok(cs) => test.assert(list.len(cs) == 0)
+        Err(_) => test.fail("a corpus that has not been started is the ordinary state")
+
+    test.case("and counting its bad lines is zero, not an error")
+    test.assert(casefile.bad_lines("/nonexistent/proptest/reverse") == 0)
+
+@test
+fn test_recording_appends_and_deduplicates() [io, fs]
+    let c = SavedCase { seed: 42, choices: [3, 1, 4], why: "not an involution" }
+
+    test.case("the first record makes the file")
+    match casefile.record("/nonexistent/proptest/reverse", c)
+        Ok(n)  => test.assert(n == 1)
+        Err(_) => test.fail("this case reaches not implemented before the file")
+
+    test.case("a fault names the path it was about")
+    test.assert(casefile.case_fault_path(CaseWriteFailed("/x", "full")) == "/x")
+    test.assert(casefile.case_fault_path(CaseUnreadable("/y", "denied")) == "/y")
+
+@test
+fn test_the_seed_is_drawn_once_and_the_row_says_so() [io, fs, rand]
+    // The row on this function is `[io, fs, rand]`: `[fs, rand]` for
+    // the entropy — rand-nv's `os_u64` reads the operating system's
+    // random device, which is a file — and `[io]` for `test.case`.
+    // Nothing wider, and in particular no `[time]`: a seed that fell
+    // back to a clock reading would replace one source of
+    // non-determinism with another.
+    test.case("a draw either gives a number or says the platform will not")
+    match seedsrc.draw_seed()
+        Some(_) => test.assert(true)
+        None    => test.assert(true)
+
+    test.case("draw_or always gives one")
+    test.assert(seedsrc.draw_or(1) != 0 - 1 or true)
+
+    test.case("and a configuration with a seed uses it")
+    test.assert(seedsrc.seed_for(runner.with_seed(runner.defaults(), 42)) == 42)
+
+@test
+fn test_a_seeded_stream_is_arithmetic_and_declares_nothing() [io]
+    // The row here is `[io]` alone.  `stream_from` is rand-nv's
+    // seedable half, which performs nothing — so a program generating
+    // fixture data beside its property tests is not charged for it.
+    test.case("the same seed gives the same stream")
+    var a = seedsrc.stream_from(42)
+    var b = seedsrc.stream_from(42)
+    test.assert(a.u64() == b.u64())

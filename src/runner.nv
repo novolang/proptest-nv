@@ -1,0 +1,306 @@
+// runner.nv — run N cases, shrink the first failure, report the
+// minimal one.
+//
+// THE LOOP, in five lines, because it is the whole package:
+//
+//   1. get a seed — the caller's, or one draw from the operating
+//      system, and report it either way;
+//   2. for each case, build a fresh tape from `seed + i` and draw a
+//      value; an overrun or a `PropSkip` is a discard, counted
+//      separately;
+//   3. the first `PropBroke` stops the loop and keeps its transcript;
+//   4. drive `shrink`'s walk: take a candidate, replay it through the
+//      SAME strategy, and answer `keep` or `reject` by whether the
+//      property broke on it the same way;
+//   5. report the minimal value, the reason, the seed and the
+//      transcript, as a value.
+//
+// A CASE PER TAPE, seeded `seed + i`, rather than one long tape.  It
+// costs a splitmix64 step per case and it buys two things: a case is
+// reproducible on its own, and a failing case's transcript starts at
+// its own beginning rather than a thousand draws into a stream.
+//
+// THE ROWS, and they are the disclosure:
+//
+//     check      [fs, rand]        the seed draw, and nothing else
+//     check_io   [fs, rand, io]    …with a property that performs
+//     replay     none              a recorded case, reproduced
+//
+// `replay` declaring nothing is the one worth pointing at: reproducing
+// a failure needs no entropy, no clock and no file, so a person can
+// investigate one inside a function that is charged nothing — and a
+// `@test` that replays a known counterexample has an empty row.
+//
+// WHY TWO ENTRIES AND NOT ONE POLYMORPHIC ONE.  The shape the
+// publishing guide recommends for "charged what the caller costs" is a
+// bound effect parameter, `fn check<T, P: Property[e]>(…) [e]`.  It
+// cannot be written here: SPEC § 3.6's grammar is
+// `trait_bound ::= TYPE_IDENT [ '[' ident ']' ]`, so a bound carries an
+// effect argument and never a TYPE argument, and a property trait
+// generic over the value type has no spelling.  A function-typed
+// parameter with a concrete row — `fn(T) -> PropCheck [io]` — does
+// compile, so the surface is two named entries with two honest rows
+// rather than one with a variable.
+
+// How a run is configured.
+//
+// ```novo
+// use runner
+//
+// fn main() [io]
+//     println("${runner.defaults().cases}")
+// ```
+pub struct PropConfig
+    // How many cases to run before declaring a pass.  256 by default,
+    // which is proptest's number and is enough to find a bug that one
+    // case in fifty exposes.
+    cases: Int
+    // How many shrink candidates to offer before giving up and
+    // reporting the best found.  A cap rather than a target: a shrink
+    // that has stopped making progress should stop costing time.
+    max_shrinks: Int
+    // How many skipped or discarded cases to tolerate before calling
+    // the run exhausted.  Counted against the whole run, not per case.
+    max_skips: Int
+    // The seed to use.  `None` draws one, which is the default;
+    // `Some(n)` makes the run reproducible from the start and touches
+    // no entropy at all.
+    seed: ?Int
+    // A file to record failures in, and to re-run before the
+    // generated cases.  `None` by default — see `casefile`'s header
+    // for why a persisted corpus is opt-in.
+    case_file: ?Str
+
+// The default configuration: 256 cases, 1024 shrink candidates, 2048
+// tolerated skips, a drawn seed, no case file.
+//
+// ```novo
+// use runner
+//
+// fn main() [io]
+//     println("${runner.defaults().max_shrinks}")
+// ```
+pub fn defaults() -> PropConfig
+    todo("proptest-nv.runner.defaults")
+
+// The same configuration with a fixed seed.
+//
+// The call a person makes when a failure report has handed them a
+// seed and they want the run back.
+//
+// ```novo
+// use runner
+//
+// fn main() [io]
+//     match runner.with_seed(runner.defaults(), 42).seed
+//         Some(s) => println("${s}")
+//         None    => println("no seed")
+// ```
+pub fn with_seed(cfg: PropConfig, seed: Int) -> PropConfig
+    todo("proptest-nv.runner.with_seed")
+
+// The same configuration with a different case count.
+//
+// ```novo
+// use runner
+//
+// fn main() [io]
+//     println("${runner.with_cases(runner.defaults(), 1000).cases}")
+// ```
+pub fn with_cases(cfg: PropConfig, cases: Int) -> PropConfig
+    todo("proptest-nv.runner.with_cases")
+
+// The same configuration with a failure file.
+//
+// **The one optional host feature, and it is off by default.**
+//
+// ```novo
+// use runner
+//
+// fn main() [io]
+//     match runner.with_case_file(runner.defaults(), ".proptest/reverse").case_file
+//         Some(p) => println(p)
+//         None    => println("no case file")
+// ```
+pub fn with_case_file(cfg: PropConfig, path: Str) -> PropConfig
+    todo("proptest-nv.runner.with_case_file")
+
+// **Run a property.**
+//
+// The strategy generates, the property judges, and the verdict says
+// what happened with the seed that reproduces it.  `[fs, rand]` is the
+// seed draw; a configuration with `seed: Some(n)` still declares the
+// row, because a signature is a claim about what a call MAY touch and
+// not about what one particular argument makes it touch.
+//
+// ```novo
+// use runner
+// use strategy
+// use propcheck
+// use std.list
+//
+// fn reverse_is_an_involution() -> PropVerdict<[Int]> [fs, rand]
+//     runner.check(strategy.list_of(strategy.int_range(0 - 99, 99), 0, 32),
+//                  runner.defaults(),
+//                  xs => propcheck.holds_if(list.reverse(list.reverse(xs)) == xs,
+//                                           "not an involution"))
+// ```
+pub fn check<T>(g: PropStrategy<T>, cfg: PropConfig,
+                prop: fn(T) -> PropCheck) -> PropVerdict<T> [fs, rand]
+    todo("proptest-nv.runner.check")
+
+// The same, for a property that performs.
+//
+// A property that writes to a database, logs, or shells out is an
+// honest property — it is how an integration invariant is checked —
+// and its row is the caller's to declare. `[io]` is the row that
+// covers a print, a pipe and a subprocess; a property that needs `[fs]`
+// or `[net]` is a case for `replay` in a loop the caller writes, and
+// the README says so.
+//
+// A property that performs is usually two statements, and a lambda
+// body is one expression — so it is written as a named function, which
+// is how a real suite writes one anyway.
+//
+// ```novo
+// use runner
+// use strategy
+// use propcheck
+//
+// fn noisy(n: Int) -> PropCheck [io]
+//     println("case ${n}")
+//     propcheck.holds_if(n >= 0, "negative")
+//
+// fn logging_holds() -> PropVerdict<Int> [fs, rand, io]
+//     runner.check_io(strategy.int_range(0, 99), runner.defaults(), noisy)
+// ```
+pub fn check_io<T>(g: PropStrategy<T>, cfg: PropConfig,
+                   prop: fn(T) -> PropCheck [io]) -> PropVerdict<T> [fs, rand, io]
+    todo("proptest-nv.runner.check_io")
+
+// **Reproduce one recorded case.  No effects at all.**
+//
+// The transcript from a failure report, replayed through the same
+// strategy against the same property.  It draws no entropy, reads no
+// clock and opens no file, so a `@test` that pins a known
+// counterexample declares nothing — and a person investigating a
+// failure can do it inside a pure function.
+//
+// The verdict is `PropPassed(1, 0)` when the case now holds, which is
+// what a regression test asserts after a fix.
+//
+// ```novo
+// use runner
+// use strategy
+// use propcheck
+// use std.list
+//
+// fn the_case_that_broke() -> PropVerdict<[Int]>
+//     runner.replay(strategy.list_of(strategy.int_range(0 - 99, 99), 0, 32),
+//                   [2, 0, 1],
+//                   xs => propcheck.holds_if(list.len(xs) < 3, "too long"))
+// ```
+pub fn replay<T>(g: PropStrategy<T>, choices: [Int], prop: fn(T) -> PropCheck) -> PropVerdict<T>
+    todo("proptest-nv.runner.replay")
+
+// Reproduce one case from a seed rather than a transcript.
+//
+// The whole run at that seed, case for case — what a person does with
+// the seed a report printed, before they have a transcript. `[fs,
+// rand]` is not needed and not declared: a seed is a number the caller
+// supplied.
+//
+// ```novo
+// use runner
+// use strategy
+// use propcheck
+//
+// fn at_seed(seed: Int) -> PropVerdict<Int>
+//     runner.check_seeded(strategy.int_range(0, 99), runner.defaults(), seed,
+//                         n => propcheck.holds_if(n < 50, "big"))
+// ```
+pub fn check_seeded<T>(g: PropStrategy<T>, cfg: PropConfig, seed: Int,
+                       prop: fn(T) -> PropCheck) -> PropVerdict<T>
+    todo("proptest-nv.runner.check_seeded")
+
+// **Run a property as a `@test` assertion.**
+//
+// The integration with `std.test`, and the one place in this package
+// where a message reaches a person. On a failure it calls
+// `test.case(label)` and then `test.fail(message)`, so the verdict a
+// runner prints is the same shape every other assertion produces:
+//
+// ```text
+//   ✗ test_reverse_is_an_involution
+//       reverse_tests.nv:14:8: case reverse twice: [1, 0] — not an
+//       involution (seed 8134502219, choices 2,1,0)
+// ```
+//
+// `show` is required and is not an oversight: `T` is generic, there is
+// no `Debug`-for-everything to bound it by that a caller's own type
+// would satisfy, and a minimal counterexample nobody can read is a
+// counterexample nobody can act on. Passing `_ => ""` is allowed and
+// leaves the seed and the transcript, which still reproduce it.
+//
+// An **exhausted** run fails the test too, with a message that says so
+// — a property whose generator never produced a usable case has not
+// been checked, and reporting it as a pass is the failure mode this
+// whole verdict exists to prevent.
+//
+// Returns nothing: a `@test` that wants to branch calls `check` and
+// looks at the verdict.
+//
+// ```novo
+// use runner
+// use strategy
+// use propcheck
+// use std.test
+// use std.list
+//
+// @test
+// fn test_reverse_is_an_involution() [fs, rand]
+//     runner.check_test("reverse twice",
+//                       strategy.list_of(strategy.int_range(0 - 99, 99), 0, 32),
+//                       runner.defaults(),
+//                       xs => propcheck.holds_if(list.reverse(list.reverse(xs)) == xs,
+//                                                "not an involution"),
+//                       xs => "${list.len(xs)} elements")
+// ```
+pub fn check_test<T>(label: Str, g: PropStrategy<T>, cfg: PropConfig, prop: fn(T) -> PropCheck,
+                     show: fn(T) -> Str) [fs, rand]
+    todo("proptest-nv.runner.check_test")
+
+// The same, reported without running: a verdict a caller already has,
+// turned into a `std.test` result.
+//
+// For a caller that ran `check`, looked at the verdict, and wants the
+// standard reporting anyway — and for `replay`, whose verdict is
+// produced with no effects and should be assertable in a `@test` with
+// an empty row.
+//
+// ```novo
+// use runner
+// use verdict
+//
+// fn report(v: PropVerdict<Int>)
+//     runner.report_test("the recorded case", v, n => "${n}")
+// ```
+pub fn report_test<T>(label: Str, v: PropVerdict<T>, show: fn(T) -> Str)
+    todo("proptest-nv.runner.report_test")
+
+// The message `check_test` would produce for a verdict.
+//
+// **Returns the text; it does not print it.**  `render` in `verdict`
+// leaves the value out because it has no renderer; this one takes one,
+// so it is the full message — and it is `pub` so a program with its
+// own reporter can produce the same words as `novo test` does.
+//
+// ```novo
+// use runner
+// use verdict
+//
+// fn line(v: PropVerdict<Int>) -> Str
+//     runner.message_for(v, n => "${n}")
+// ```
+pub fn message_for<T>(v: PropVerdict<T>, show: fn(T) -> Str) -> Str
+    todo("proptest-nv.runner.message_for")

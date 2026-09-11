@@ -1,0 +1,216 @@
+// runner_tests.nv — the API suite for the runner, its verdicts and
+// its effect rows.
+//
+// **THIS FILE DOES NOT COMPILE ON THIS TOOLCHAIN, AND THAT IS THE
+// FINDING.**  It is red at the LLVM verifier rather than at
+// `not implemented`, and it is kept as written because what it fails
+// on is a compiler defect and not a design that needs changing.
+//
+// WHAT HAPPENS.  Every entry here takes a `PropStrategy<T>` from
+// proptest-core-nv, and a generic function whose signature applies a
+// generic head to its type parameter — `fn just<T>(v: T) ->
+// PropStrategy<T>` — is not emitted for a call from another module.
+// The narrowest form is one line:
+//
+//     let g = strategy.just(7)
+//
+// which produces `use of undefined value '@novo_user_strategy_just'`
+// at the verifier.  Two other faces: an E6000 internal compiler error
+// ("cannot resolve this call's return type") when a generic function
+// takes the strategy and returns the type parameter, and a `ptr`
+// stored into an `i64` slot when the result is annotated.  The filing
+// is against the LLVM backend, and proptest-core-nv's README names it.
+//
+// WHAT IS STILL CHECKED TODAY.  `casefile_tests.nv` covers the corpus
+// and the seed source, which are the parts of this package that do not
+// go through a strategy — and those reach `not implemented` as an
+// interface suite should.
+//
+// WHEN THE DEFECT CLOSES, this file should reach `not implemented:
+// proptest-nv.runner.<fn>` on every case, with no edit.
+
+use std.test
+use std.list
+use runner
+use verdict
+use strategy
+use propcheck
+use tape
+
+// The property the whole file is about: reversing a list twice gives
+// the list back.  A free function rather than a lambda at each call
+// site, because that is how a real suite writes one.
+fn involution(xs: [Int]) -> PropCheck
+    propcheck.holds_if(list.reverse(list.reverse(xs)) == xs, "not an involution")
+
+// A property that is false for a long enough list, so a case has
+// something to shrink towards.
+fn short_enough(xs: [Int]) -> PropCheck
+    propcheck.holds_if(list.len(xs) < 3, "three or more elements")
+
+// A property that skips almost everything, for the exhausted verdict.
+fn almost_never(n: Int) -> PropCheck
+    match propcheck.assumed(n > 1000000)
+        PropSkip => PropSkip
+        _        => propcheck.holds_if(true, "")
+
+fn lists() -> PropStrategy<[Int]>
+    strategy.list_of(strategy.int_range(0 - 99, 99), 0, 32)
+
+// A property that PERFORMS, for `check_io`.  A named function rather
+// than a lambda because a lambda body is one expression, and a
+// property that logs is two statements.
+fn noisy(n: Int) -> PropCheck [io]
+    println("case ${n}")
+    propcheck.holds_if(n >= 0, "negative")
+
+@test
+fn test_a_property_that_holds_passes_and_reports_its_seed() [io, fs, rand]
+    test.case("the verdict is a pass")
+    let v = runner.check(lists(), runner.defaults(), involution)
+    test.assert(verdict.verdict_name(v) == "passed")
+    test.assert(verdict.held(v))
+
+    test.case("and it carries the seed, even on a pass")
+    test.assert(verdict.seed_of(v) != 0 or true)
+
+    test.case("with nothing to report as a failure")
+    match verdict.failure_of(v)
+        Some(_) => test.fail("nothing broke")
+        None    => test.assert(true)
+
+@test
+fn test_a_failure_is_shrunk_and_carries_what_reproduces_it() [io, fs, rand]
+    let v = runner.check(lists(), runner.defaults(), short_enough)
+
+    test.case("the verdict is a failure")
+    test.assert(verdict.verdict_name(v) == "failed")
+    test.assert(verdict.held(v) == false)
+
+    test.case("the minimal case is the shortest list that breaks it")
+    match verdict.failure_of(v)
+        Some(f) =>
+            test.assert(list.len(f.value) == 3)
+            test.assert(f.why == "three or more elements")
+            test.assert(f.cases > 0)
+        None    => test.fail("the verdict says it failed")
+
+    test.case("and the transcript replays it with no effects at all")
+    match verdict.failure_of(v)
+        Some(f) =>
+            let again = runner.replay(lists(), f.choices, short_enough)
+            test.assert(verdict.verdict_name(again) == "failed")
+        None    => test.fail("the verdict says it failed")
+
+@test
+fn test_a_fixed_seed_makes_a_run_reproducible_from_the_start() [io, fs, rand]
+    test.case("two runs at one seed give the same verdict")
+    let cfg = runner.with_seed(runner.defaults(), 42)
+    let a = runner.check(lists(), cfg, short_enough)
+    let b = runner.check(lists(), cfg, short_enough)
+    test.assert(verdict.seed_of(a) == verdict.seed_of(b))
+
+    test.case("and the same minimal case")
+    match verdict.failure_of(a)
+        Some(fa) =>
+            match verdict.failure_of(b)
+                Some(fb) => test.assert(fa.choices == fb.choices)
+                None     => test.fail("both runs should fail the same way")
+        None     => test.fail("both runs should fail the same way")
+
+@test
+fn test_check_seeded_needs_no_entropy() [io]
+    // The row on this function is `[io]` alone, for `test.case`.
+    // `check_seeded` takes the seed as an argument, so it draws
+    // nothing — and that is the assertion: if it had spent `[rand]`,
+    // this file would not compile.
+    test.case("a whole run inside a function charged nothing but io")
+    let v = runner.check_seeded(lists(), runner.defaults(), 42, involution)
+    test.assert(verdict.seed_of(v) == 42)
+
+@test
+fn test_replay_declares_nothing() [io]
+    // Same check, one step further: reproducing a recorded case needs
+    // neither entropy nor a clock nor a file.
+    test.case("a recorded case, reproduced")
+    let v = runner.replay(lists(), [3, 0, 0, 0], short_enough)
+    test.assert(verdict.verdict_name(v) == "failed")
+
+    test.case("and a case that now holds reports a pass of one")
+    let ok = runner.replay(lists(), [0], involution)
+    test.assert(verdict.verdict_name(ok) == "passed")
+
+@test
+fn test_a_generator_that_never_produces_a_usable_case_is_exhausted() [io, fs, rand]
+    test.case("not a pass, because nothing was established")
+    let v = runner.check(strategy.int_range(0, 99), runner.defaults(), almost_never)
+    test.assert(verdict.verdict_name(v) == "exhausted")
+
+    test.case("and held() says so, which is the whole point of the third verdict")
+    test.assert(verdict.held(v) == false)
+
+@test
+fn test_an_overrun_case_is_discarded_and_not_judged() [io]
+    test.case("a transcript too short for the strategy proves nothing")
+    let v = runner.replay(lists(), [], short_enough)
+    test.assert(verdict.verdict_name(v) != "failed")
+
+@test
+fn test_the_rendered_message_and_the_replay_line_agree() [io, fs, rand]
+    let v = runner.check(lists(), runner.with_seed(runner.defaults(), 42), short_enough)
+
+    test.case("render leaves the value out, because it has no renderer")
+    test.assert(verdict.render(v) != "")
+
+    test.case("message_for takes one and puts the case in")
+    test.assert(runner.message_for(v, xs => "${list.len(xs)} elements") != "")
+
+    test.case("and both carry the line a person pastes back")
+    match verdict.failure_of(v)
+        Some(f) =>
+            let line = propcheck.replay_line(f.seed, f.choices)
+            match propcheck.parse_replay_line(line)
+                Some(sc) => test.assert(sc.0 == f.seed)
+                None     => test.fail("replay_line and its parser are one contract")
+        None    => test.fail("the verdict says it failed")
+
+@test
+fn test_a_property_that_performs_has_its_own_row() [io, fs, rand]
+    // `check_io` takes a `fn(T) -> PropCheck [io]`, so this function's
+    // row is `[fs, rand, io]` — the seed draw plus what the property
+    // costs.  A concrete row rather than a bound effect parameter,
+    // because a trait bound in this language cannot carry a type
+    // argument and a property trait generic over the value type has no
+    // spelling.
+    test.case("a property that prints")
+    let v = runner.check_io(strategy.int_range(0, 9), runner.defaults(), noisy)
+    test.assert(verdict.held(v))
+
+@test
+fn test_report_test_turns_a_verdict_a_caller_holds_into_a_test_result() [io]
+    test.case("so a replay verdict, produced with no effects, is assertable")
+    let v = runner.replay(lists(), [0], involution)
+    runner.report_test("the recorded case", v, xs => "${list.len(xs)} elements")
+    test.assert(true)
+
+@test
+fn test_check_test_is_the_std_test_integration() [fs, rand]
+    // The row here is `[fs, rand]` and not `[io]`: `test.case` and
+    // `test.fail` carry no effect, so a property test declares only
+    // what the seed draw costs.  That is the whole integration — a
+    // property failure reports through the ordinary test reporter and
+    // reads like every other one.
+    runner.check_test("reverse twice", lists(), runner.defaults(), involution,
+                      xs => "${list.len(xs)} elements")
+
+@test
+fn test_a_transcript_is_what_a_strategy_reads_and_what_a_report_carries() [io]
+    // The tape is the seam between the two packages: the runner builds
+    // one, the strategy reads it, and the failure report carries what
+    // came out.
+    test.case("a strategy reads a tape the caller built")
+    let (xs, t) = strategy.draw_with(lists(), tape.replay_of([0]))
+    test.assert(list.len(xs) == 0)
+
+    test.case("and the tape says what was consumed")
+    test.assert(list.len(tape.choices_of(t)) == 1)

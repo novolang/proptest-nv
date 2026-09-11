@@ -1,0 +1,88 @@
+// seedsrc.nv — where a seed comes from, and the one place randomness
+// is used at all.
+//
+// ONE DRAW PER RUN.  `rand.os_u64()` picks an integer and everything
+// after it — every case, every shrink candidate, every replay — is a
+// function of that integer and of nothing else.  That is why the row
+// on `runner.replay` is empty and the row here is `[fs, rand]`: the
+// entropy is a file on the platforms this runs on, and rand-nv's
+// `os_u64` declares both labels.
+//
+// WHY NOT `std.rand`.  `rand.seed(n)` sets a PROCESS-WIDE seed, so two
+// property tests in one process would interfere and a third caller's
+// `rand.shuffle` would move both.  rand-nv's operating-system half
+// hands back an integer and keeps no state, which is the shape a
+// runner wants: draw once, and own the determinism from there.
+//
+// A SEED IS ALWAYS REPORTABLE.  `os_u64` returns `?Int`, and a
+// platform that will not answer is not a reason to fail a test run —
+// so `draw_or` takes a fallback, and the fallback is a constant rather
+// than a clock reading, because a clock reading is a second source of
+// non-determinism arriving where the first one was removed.
+
+// A seed from the operating system's entropy, or `None`.
+//
+// The raw call, `pub` because a program that wants to log the seed
+// before running anything should not have to start a run to get one.
+//
+// ```novo
+// use seedsrc
+//
+// fn main() [fs, rand, io]
+//     match seedsrc.draw_seed()
+//         Some(s) => println("${s}")
+//         None    => println("no entropy on this platform")
+// ```
+pub fn draw_seed() -> ?Int [fs, rand]
+    todo("proptest-nv.seedsrc.draw_seed")
+
+// A seed from the operating system, or the fallback.
+//
+// The call a runner makes.  The fallback is a plain integer and not a
+// clock reading: a run that could not read entropy should still be
+// deterministic, and a time-based seed would make it merely
+// unpredictable — which is the opposite of what this package is for.
+//
+// ```novo
+// use seedsrc
+//
+// fn main() [fs, rand, io]
+//     println("${seedsrc.draw_or(1)}")
+// ```
+pub fn draw_or(fallback: Int) -> Int [fs, rand]
+    todo("proptest-nv.seedsrc.draw_or")
+
+// The seed a configuration says to use, drawing one if it does not say.
+//
+// The one call in the package that decides whether a run is
+// reproducible from the start or reproducible after the fact: a
+// `PropConfig` with `seed: Some(n)` never touches entropy, and one
+// with `None` draws once and reports what it drew.
+//
+// ```novo
+// use seedsrc
+// use runner
+//
+// fn main() [fs, rand, io]
+//     println("${seedsrc.seed_for(runner.defaults())}")
+// ```
+pub fn seed_for(cfg: PropConfig) -> Int [fs, rand]
+    todo("proptest-nv.seedsrc.seed_for")
+
+// A deterministic stream from a seed, for a caller that wants one.
+//
+// rand-nv's seedable half, re-exported here so that a program
+// generating fixture data beside its property tests uses the same
+// entropy discipline and does not reach for the process-wide
+// `std.rand`.  **No effects**: a seeded generator is arithmetic.
+//
+// ```novo
+// use seedsrc
+//
+// fn main() [io]
+//     var a = seedsrc.stream_from(42)
+//     var b = seedsrc.stream_from(42)
+//     println("${a.u64() == b.u64()}")
+// ```
+pub fn stream_from(seed: Int) -> Rng
+    todo("proptest-nv.seedsrc.stream_from")
