@@ -142,7 +142,7 @@ pub fn with_case_file(cfg: PropConfig, path: Str) -> PropConfig
 // fn reverse_is_an_involution() -> PropVerdict<[Int]> [fs, rand]
 //     runner.check(strategy.list_of(strategy.int_range(0 - 99, 99), 0, 32),
 //                  runner.defaults(),
-//                  xs => propcheck.holds_if(list.reverse(list.reverse(xs)) == xs,
+//                  xs => propcheck.holds_if(list.rev(list.rev(xs)) == xs,
 //                                           "not an involution"))
 // ```
 pub fn check<T>(g: PropStrategy<T>, cfg: PropConfig,
@@ -262,7 +262,7 @@ pub fn check_seeded<T>(g: PropStrategy<T>, cfg: PropConfig, seed: Int,
 //     runner.check_test("reverse twice",
 //                       strategy.list_of(strategy.int_range(0 - 99, 99), 0, 32),
 //                       runner.defaults(),
-//                       xs => propcheck.holds_if(list.reverse(list.reverse(xs)) == xs,
+//                       xs => propcheck.holds_if(list.rev(list.rev(xs)) == xs,
 //                                                "not an involution"),
 //                       xs => "${list.len(xs)} elements")
 // ```

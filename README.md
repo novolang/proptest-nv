@@ -83,7 +83,7 @@ use strategy
 // The property, as an ordinary function. The text is used only on a
 // failure, and it is the sentence the report prints.
 fn involution(xs: [Int]) -> PropCheck
-    propcheck.holds_if(list.reverse(list.reverse(xs)) == xs,
+    propcheck.holds_if(list.rev(list.rev(xs)) == xs,
                        "not an involution")
 
 @test

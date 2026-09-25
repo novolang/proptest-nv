@@ -41,7 +41,7 @@ use tape
 // the list back.  A free function rather than a lambda at each call
 // site, because that is how a real suite writes one.
 fn involution(xs: [Int]) -> PropCheck
-    propcheck.holds_if(list.reverse(list.reverse(xs)) == xs, "not an involution")
+    propcheck.holds_if(list.rev(list.rev(xs)) == xs, "not an involution")
 
 // A property that is false for a long enough list, so a case has
 // something to shrink towards.

@@ -1,6 +1,6 @@
 [package]
 name        = "proptest-nv"
-version     = "0.0.2"
+version     = "0.0.3"
 description = "The property-test runner: N cases from a seed the caller gives or the operating system draws, the first failure shrunk to its minimal case, and a report that is a value carrying the seed that reproduces it — reported through std.test so a property failure reads like every other test failure."
 license     = "Apache-2.0"
 
