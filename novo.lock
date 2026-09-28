@@ -3,9 +3,9 @@
 [proptest-core-nv]
 source = "registry"
 url = "https://registry.novo-lang.org"
-req = "^0.0.1"
-version = "0.0.1"
-hash = "acf9e3b92ca133ff877ec794c9500a282d37cb2f6a435e80607b135d48d48473"
+req = "^0.1.0"
+version = "0.1.0"
+hash = "737d14a008c97f631e5a52ec13043a043eec12805462b73c419b0cb69a2d08ce"
 
 [rand-nv]
 source = "registry"
