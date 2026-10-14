@@ -12,12 +12,6 @@ runner's shape follows
 of skipped cases follows
 [Hypothesis](https://hypothesis.readthedocs.io/en/latest/).
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared
-with its full signature, but every body is a `todo()` that panics when
-called. The package is published so its design can be reviewed and
-depended on before it is implemented. Version 0.1.0 will be the first
-working release.
-
 ## What it is
 
 A **property** is a fact that should hold for every input, such as
@@ -104,14 +98,10 @@ A failure appears where every other test failure does.
 ```text
   ✗ test_reverse_is_an_involution
       reverse_tests.nv:14:8: case reverse twice: 3 elements — not an
-      involution (seed 8134502219, choices 2,1,0)
+      involution (seed 8134502219 choices 2,1,0)
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a
-`not implemented: proptest-nv.<module>.<fn>` panic, or one from
-proptest-core-nv. The tests are the specification the implementation will
-have to satisfy.
+Build and test with `novo pkg build` and `novo test`.
 
 ## What the package contains
 
@@ -258,7 +248,21 @@ message as text for a reporter of your own.
 ```bash
 novo test tests/runner_tests.nv      # 12 tests: the run, the verdicts, the effects
 novo test tests/casefile_tests.nv    #  8 tests: the corpus format and the seed draw
+novo test tests/proptest_nv_edge_tests.nv  # 9 tests: the four pins
 ```
+
+`tests/proptest_nv_edge_tests.nv` is the suite 0.1.0 adds beside the two
+shipped ones.  It pins the four things this package is its own oracle
+for: that a run performs exactly the number of cases it was asked for,
+that shrinking terminates and strictly decreases under
+`shrink.simpler_than`, that a failure is reproducible from its seed alone
+and from its transcript with no seed at all, and that the case a
+transcript replays is judged by the same property the run was.  It also
+holds the two pins a run's budgets and a corpus need: `max_shrinks`
+counts candidates OFFERED rather than accepted, and a corpus
+deduplicates on the seed and the transcript together rather than on
+either one.  The corpus for real, on a writable path, is here too —
+`casefile_tests.nv` records into a path only root could write.
 
 The reference implementations are proptest, for the case count, the
 shrink budget, the seed in the failure report and the persisted
@@ -275,26 +279,17 @@ case is exhausted rather than passed, that an overrun case is discarded
 and not judged, that the rendered message and the replay line agree, that
 the corpus is off by default, that the corpus format round-trips with no
 file on disk, that a corrupt line is skipped rather than fatal, that an
-absent file is an empty corpus, that recording appends and does not
-duplicate, and that the seed is drawn exactly once.
+absent file is an empty corpus, and that the seed is drawn exactly once.
 
-The tests compile today and fail at run, each on a `not implemented`
-panic from this package or from proptest-core-nv. That is the expected
-state of an interface release. They turn green one at a time as bodies
-land.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| `runner.defaults`, `.with_seed`, `.with_cases`, `.with_case_file` | no |
-| `runner.check`, `.check_io`, `.check_seeded`, `.replay` | no |
-| `runner.check_test`, `.report_test`, `.message_for` | no |
-| `verdict.verdict_name`, `.held`, `.seed_of`, `.failure_of`, `.render` | no |
-| `seedsrc.draw_seed`, `.draw_or`, `.seed_for`, `.stream_from` | no |
-| `casefile.load_cases`, `.record`, `.bad_lines` | no |
-| `casefile.render_cases`, `.parse_cases`, `.case_fault_path` | no |
-| `CaseFileFault.message` | no |
+`test_recording_appends_and_deduplicates` is the one case left red, and
+it is red on the suite rather than on the package. It records into
+`/nonexistent/proptest/reverse` and asserts `Ok(1)`, which needs a
+writable `/`, while the case just above it requires that same path to
+hold an empty corpus — a file this one would have created. Both cannot
+hold, so nothing was reshaped to chase it; the `### Known` section of
+`CHANGELOG.md` carries the diagnosis. Appending, deduplicating and the
+fault paths are covered on a writable path in
+`tests/proptest_nv_edge_tests.nv`.
 
 ## Licence
 

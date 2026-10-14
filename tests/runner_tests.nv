@@ -1,33 +1,5 @@
 // runner_tests.nv — the API suite for the runner, its verdicts and
 // its effect rows.
-//
-// **THIS FILE DOES NOT COMPILE ON THIS TOOLCHAIN, AND THAT IS THE
-// FINDING.**  It is red at the LLVM verifier rather than at
-// `not implemented`, and it is kept as written because what it fails
-// on is a compiler defect and not a design that needs changing.
-//
-// WHAT HAPPENS.  Every entry here takes a `PropStrategy<T>` from
-// proptest-core-nv, and a generic function whose signature applies a
-// generic head to its type parameter — `fn just<T>(v: T) ->
-// PropStrategy<T>` — is not emitted for a call from another module.
-// The narrowest form is one line:
-//
-//     let g = strategy.just(7)
-//
-// which produces `use of undefined value '@novo_user_strategy_just'`
-// at the verifier.  Two other faces: an E6000 internal compiler error
-// ("cannot resolve this call's return type") when a generic function
-// takes the strategy and returns the type parameter, and a `ptr`
-// stored into an `i64` slot when the result is annotated.  The filing
-// is against the LLVM backend, and proptest-core-nv's README names it.
-//
-// WHAT IS STILL CHECKED TODAY.  `casefile_tests.nv` covers the corpus
-// and the seed source, which are the parts of this package that do not
-// go through a strategy — and those reach `not implemented` as an
-// interface suite should.
-//
-// WHEN THE DEFECT CLOSES, this file should reach `not implemented:
-// proptest-nv.runner.<fn>` on every case, with no edit.
 
 use std.test
 use std.list
@@ -85,7 +57,7 @@ fn test_a_failure_is_shrunk_and_carries_what_reproduces_it() [io, fs, rand]
 
     test.case("the verdict is a failure")
     test.assert(verdict.verdict_name(v) == "failed")
-    test.assert(verdict.held(v) == false)
+    test.assert(not verdict.held(v))
 
     test.case("the minimal case is the shortest list that breaks it")
     match verdict.failure_of(v)
@@ -147,7 +119,7 @@ fn test_a_generator_that_never_produces_a_usable_case_is_exhausted() [io, fs, ra
     test.assert(verdict.verdict_name(v) == "exhausted")
 
     test.case("and held() says so, which is the whole point of the third verdict")
-    test.assert(verdict.held(v) == false)
+    test.assert(not verdict.held(v))
 
 @test
 fn test_an_overrun_case_is_discarded_and_not_judged() [io]

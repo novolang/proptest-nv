@@ -1,0 +1,606 @@
+// proptest_nv_edge_tests.nv — the edges of the runner's own contract.
+//
+// Run with `--isolate` for one verdict per `@test`.
+//
+// WHAT THIS FILE PINS, and why each one is here rather than in the two
+// shipped suites.  A property-testing library is its own oracle's
+// oracle: if the runner gets these four things wrong, every suite
+// written with it reports a green that means nothing, and no assertion
+// inside those suites can notice.
+//
+//   1. THE CASE COUNT IS THE NUMBER ASKED FOR.  A pass reports
+//      `cases == cfg.cases`, for one, for seven and for the default
+//      256 — a runner that silently runs fewer cases than it was told
+//      to is a runner whose "passed" means nothing.
+//   2. SHRINKING TERMINATES, AND IT STRICTLY DECREASES.  Under
+//      proptest-core-nv's own ordering, `shrink.simpler_than`, which
+//      this file asserts on directly rather than reimplementing.  The
+//      walk is budgeted by `max_shrinks`, and a budget of zero, of
+//      one, and of 1024 are all exercised.
+//   3. A FAILURE IS REPRODUCIBLE FROM ITS SEED ALONE.  Two runs at one
+//      seed give one failure — same transcript, same value, same
+//      reason — and that transcript replays through `runner.replay`,
+//      which declares no effects at all.
+//   4. THE REPORT EMBEDS `propcheck.replay_line` VERBATIM.  The line a
+//      log shows, the line a corpus holds and the text a person pastes
+//      back are one spelling, asserted to the byte.
+//
+// The corpus cases (append, deduplicate, and both fault paths) are on
+// a path this process can actually write, which is the one thing
+// `casefile_tests.nv` cannot do: it records into `/nonexistent`,
+// where only root could write, so its recording case is red and stays
+// red.
+
+use std.test
+use std.list
+use std.str
+use std.fs
+use runner
+use verdict
+use strategy
+use propcheck
+use shrink
+use seedsrc
+use tape
+use casefile
+
+// The strategy the shrink and reproducibility cases are about: a list
+// of up to thirty-two integers in `-99..99`.
+fn lists() -> PropStrategy<[Int]>
+    strategy.list_of(strategy.int_range(0 - 99, 99), 0, 32)
+
+// A small list strategy, for the io walk: the shrink is measured in
+// candidates offered, and a wide range would spend the whole budget
+// walking a value down to its smallest form.
+fn small_lists() -> PropStrategy<[Int]>
+    strategy.list_of(strategy.int_range(0, 3), 0, 4)
+
+// A property that always holds, for the case-count cases.
+fn involution(xs: [Int]) -> PropCheck
+    propcheck.holds_if(list.rev(list.rev(xs)) == xs, "not an involution")
+
+// A property that is false for a long enough list, so a case has
+// something to shrink towards.  Three elements is the minimum that
+// breaks it, which is what makes "did the walk reach the bottom"
+// answerable.
+fn short_enough(xs: [Int]) -> PropCheck
+    propcheck.holds_if(list.len(xs) < 3, "three or more elements")
+
+// A property that skips every case, for the exhausted line.
+fn never(_n: Int) -> PropCheck
+    propcheck.assumed(false)
+
+// The same two properties for the `[io]` row, so the performing half
+// of the runner is walked rather than only the pure half.  They are
+// separate functions and not one with a variable row, because a
+// function-typed parameter must name its effects concretely (SPEC
+// section 3.6).
+fn noisy_break(xs: [Int]) -> PropCheck [io]
+    println("judging ${list.len(xs)}")
+    propcheck.holds_if(false, "always broken")
+
+fn noisy_skip(_n: Int) -> PropCheck [io]
+    println("skipping")
+    propcheck.assumed(false)
+
+fn noisy_holds(n: Int) -> PropCheck [io]
+    println("case ${n}")
+    propcheck.holds_if(n >= 0, "negative")
+
+// A strategy that reads three choices and answers with their sum.
+//
+// Written with `strategy.from_draw` rather than taken from the
+// library, because it is the shape that puts an UNREADABLE candidate
+// on a shrink walk: every candidate that deletes part of the
+// transcript leaves the three draws with nothing to read, so the tape
+// comes back overrun and the candidate has to be discarded.
+fn stubborn(t: Tape) -> (Int, Tape)
+    let (a, t2) = tape.next_small(t, 0, 9)
+    let (b, t3) = tape.next_small(t2, 0, 9)
+    let (c, t4) = tape.next_small(t3, 0, 9)
+    (a + b + c, t4)
+
+// A property that breaks on every value, so the walk has nowhere to
+// stop early.
+fn always_breaks(_n: Int) -> PropCheck
+    propcheck.holds_if(false, "always")
+
+// The same for a list, and it is a second function rather than one
+// over a generic value: `check_seeded`'s `T` comes from the strategy
+// and the property together, so a property typed for `Int` beside a
+// strategy drawing lists cannot be inferred at all (E2016).
+fn breaks_on_every_list(_xs: [Int]) -> PropCheck
+    propcheck.holds_if(false, "every list breaks")
+
+// A configuration written out field by field.
+//
+// `with_seed`, `with_cases` and `with_case_file` each change one
+// field and there is no entry that changes `max_shrinks` or
+// `max_skips`, which is exactly what this file needs to vary — so the
+// literal is the way in.  The type is named bare rather than
+// `runner.PropConfig` for the reason `runner`'s own header gives: a
+// qualified struct literal is `E1002 parse error near '{'` on this
+// toolchain.
+fn budgets(cases: Int, max_shrinks: Int, max_skips: Int, seed: Int) -> PropConfig
+    PropConfig { cases: cases, max_shrinks: max_shrinks, max_skips: max_skips,
+                 seed: Some(seed), case_file: None }
+
+@test
+fn test_a_run_performs_exactly_the_cases_it_was_asked_for() [io]
+    // The Row is `[io]` alone: `check_seeded` draws no seed and reads
+    // no file, so a suite about case counts costs nothing but the
+    // printing of its case labels.
+    test.case("one case")
+    match runner.check_seeded(lists(), budgets(1, 0, 2048, 42), 42, involution)
+        PropPassed(cases, seed) =>
+            test.assert(cases == 1)
+            test.assert(seed == 42)
+        _                       => test.fail("an involution holds, so one case of it passes")
+
+    test.case("seven, which is not a power of two and not the default")
+    match runner.check_seeded(lists(), budgets(7, 0, 2048, 5), 5, involution)
+        PropPassed(cases, seed) =>
+            test.assert(cases == 7)
+            test.assert(seed == 5)
+        _                       => test.fail("seven cases of an involution pass")
+
+    test.case("and 256, the default, through the ordinary entry")
+    match runner.check_seeded(lists(), runner.with_seed(runner.defaults(), 9), 9, involution)
+        PropPassed(cases, _) => test.assert(cases == 256)
+        _                    => test.fail("the default is 256 cases")
+
+    test.case("a pass renders that count and that seed")
+    test.assert(verdict.render(runner.check_seeded(lists(), budgets(5, 0, 2048, 42), 42,
+                                                   involution))
+                == "passed 5 cases (seed 42)")
+
+@test
+fn test_shrinking_terminates_and_strictly_decreases_under_its_own_order() [io]
+    let g = lists()
+
+    test.case("the order itself, which the walk is measured against")
+    test.assert(shrink.simpler_than([1], [1, 1]))
+    test.assert(shrink.simpler_than([2], [1, 1]))
+    test.case("length first, and only then the values")
+    test.assert(shrink.simpler_than([1, 1], [2, 1]))
+    test.assert(shrink.simpler_than([1, 1], [1, 2]))
+    test.assert(not shrink.simpler_than([2, 1], [1, 1]))
+    test.assert(not shrink.simpler_than([3], [2]))
+    test.case("and it is strict: nothing is simpler than itself")
+    test.assert(not shrink.simpler_than([1], [1]))
+    test.assert(not shrink.simpler_than([1, 2, 3], [1, 2, 3]))
+
+    // A budget of zero offers no candidate at all, so this verdict is
+    // the case as the generator drew it — the baseline a shrink has to
+    // beat.  Without it there is nothing to compare against, and
+    // "the shrink got smaller" would be an assertion about a number
+    // this file produced itself.
+    let raw = runner.check_seeded(g, budgets(64, 0, 2048, 7), 7, short_enough)
+    let walked = runner.check_seeded(g, budgets(64, 1024, 2048, 7), 7, short_enough)
+
+    test.case("a budget of zero leaves the drawn case exactly as it was")
+    match verdict.failure_of(raw)
+        Some(r) =>
+            test.assert(r.shrinks == 0)
+            test.assert(list.len(r.value) >= 3)
+            test.case("and the walk makes the same failure strictly simpler")
+            match verdict.failure_of(walked)
+                Some(s) =>
+                    test.assert(shrink.simpler_than(s.choices, r.choices))
+                    test.assert(s.shrinks > 0)
+                    test.case("with the smallest case that breaks it, and the same bug")
+                    test.assert(list.len(s.value) == 3)
+                    test.assert(s.why == r.why)
+                    test.assert(s.cases == r.cases)
+                    test.assert(s.seed == r.seed)
+                    test.case("and it terminated inside its budget")
+                    test.assert(s.shrinks <= 1024)
+                None    => test.fail("the same property fails at the same seed")
+        None    => test.fail("a list of three or more elements breaks it")
+
+    test.case("a budget of one offers at most one candidate")
+    match verdict.failure_of(runner.check_seeded(g, budgets(64, 1, 2048, 7), 7, short_enough))
+        Some(f) =>
+            test.assert(f.shrinks <= 1)
+            test.case("and invents nothing the budget did not pay for")
+            match verdict.failure_of(raw)
+                Some(r) =>
+                    test.assert(shrink.simpler_than(f.choices, r.choices)
+                                or f.choices == r.choices)
+                None    => test.fail("the baseline run failed")
+        None    => test.fail("a budget of one still reports the failure")
+
+    test.case("and the budget counts candidates OFFERED, not candidates taken")
+    // The sharp end of the budget test, and the reason it is not
+    // written against zero.  A plan's first offers are the long
+    // deletions, and `list_of` cannot read a list out of a transcript
+    // with the length removed, so they are refused rather than taken:
+    // a run does not spend its budget one accepted shrink at a time.
+    // At this seed the first reduction this transcript admits is the
+    // sixth offer.  Five offers must therefore report the case as
+    // drawn — nothing accepted — and six must report one.  A budget
+    // tested with `>` instead of `>=` hands the five-offer run a sixth
+    // candidate and reports a shrink the budget did not pay for.
+    let (drawn, _) = strategy.draw_with(g, tape.from_seed(11))
+    match verdict.failure_of(runner.check_seeded(g, budgets(8, 5, 2048, 11), 11,
+                                                breaks_on_every_list))
+        Some(f) =>
+            test.assert(f.shrinks == 0)
+            test.assert(f.value == drawn)
+            test.case("and the offer after it is taken, so the walk does move")
+            match verdict.failure_of(runner.check_seeded(g, budgets(8, 6, 2048, 11), 11,
+                                                         breaks_on_every_list))
+                Some(g6) => test.assert(g6.shrinks >= 1)
+                None     => test.fail("one more offer is a failure still")
+        None    => test.fail("a property that breaks on every case fails")
+
+@test
+fn test_a_failure_is_reproducible_from_its_seed_alone() [io]
+    let cfg = budgets(64, 1024, 2048, 99)
+    let a = runner.check_seeded(lists(), cfg, 99, short_enough)
+    let b = runner.check_seeded(lists(), cfg, 99, short_enough)
+
+    test.case("the seed is the one that was asked for")
+    test.assert(verdict.seed_of(a) == 99)
+
+    test.case("two runs at one seed give one failure, field for field")
+    match verdict.failure_of(a)
+        Some(fa) =>
+            match verdict.failure_of(b)
+                Some(fb) =>
+                    test.assert(fa.choices == fb.choices)
+                    test.assert(fa.value == fb.value)
+                    test.assert(fa.why == fb.why)
+                    test.assert(fa.cases == fb.cases)
+                    test.assert(fa.shrinks == fb.shrinks)
+                    test.case("and that transcript replays it with no seed at all")
+                    match verdict.failure_of(runner.replay(lists(), fa.choices, short_enough))
+                        Some(fr) =>
+                            test.assert(fr.why == fa.why)
+                            test.assert(fr.value == fa.value)
+                        None     => test.fail("the transcript a failure carries replays it")
+                    test.case("and the transcript is the shrunk one, not the drawn one")
+                    test.assert(list.len(fa.value) == 3)
+                None     => test.fail("the second run at the same seed failed too")
+        None     => test.fail("a list of three or more elements breaks it")
+
+    test.case("replay of the unshrunk transcript fails the same way")
+    match verdict.failure_of(runner.replay(
+            lists(), shrink.best_of(shrink.plan_from([3, 2, 1, 0])), short_enough))
+        Some(f) =>
+            test.assert(f.why == "three or more elements")
+            test.case("though its verdict carries no seed, because it was given none")
+            test.assert(f.seed == 0)
+        None    => test.fail("three elements break it")
+
+@test
+fn test_an_exhausted_run_renders_both_counts_and_is_not_a_pass() [io]
+    // `max_skips` is the second budget, and the one a reader forgets:
+    // a property whose precondition is never true must be diagnosed
+    // rather than reported as a pass.  Four is small enough that the
+    // line can be asserted to the byte.
+    let v = runner.check_seeded(strategy.int_range(0, 99), budgets(8, 0, 4, 3), 3, never)
+
+    test.case("the verdict is the third one")
+    test.assert(verdict.verdict_name(v) == "exhausted")
+
+    test.case("held() says false, which is the whole reason it exists")
+    test.assert(not verdict.held(v))
+
+    test.case("and the line reports the skips, not only the outcome")
+    test.assert(verdict.render(v) == "exhausted: 0 cases ran and 4 were skipped (seed 3)")
+
+    test.case("the seed is carried by this verdict too, not only by a pass or a failure")
+    test.assert(verdict.seed_of(v) == 3)
+    match verdict.failure_of(v)
+        Some(_) => test.fail("nothing broke, so there is no failure to carry")
+        None    => test.assert(true)
+
+    test.case("a skip budget smaller than the case budget is honoured as written")
+    test.assert(verdict.verdict_name(
+                    runner.check_seeded(strategy.int_range(0, 99), budgets(8, 0, 1, 3), 3, never))
+                == "exhausted")
+
+    test.case("and a recorded case whose property now skips is exhausted, not failed")
+    // `replay` answers the third verdict for a skip as well as for an
+    // overrun: a case that proves nothing must not be reported as a
+    // counterexample.  Its seed is 0, because a transcript is not a
+    // seed and pretending otherwise would put a number in a report
+    // that does not reproduce it.
+    let sk = runner.replay(strategy.int_range(0, 9), [0], never)
+    test.assert(verdict.verdict_name(sk) == "exhausted")
+    test.assert(verdict.seed_of(sk) == 0)
+
+@test
+fn test_the_corpus_records_once_on_a_writable_path() [io, fs]
+    // The one suite in this package that exercises the corpus for
+    // real.  `casefile_tests.nv` records into `/nonexistent`, where
+    // only root could write, so its recording case is red by
+    // construction and its fault path is the only one it can reach.
+    let dir = "/tmp/proptest-nv-edge"
+    let corpus = "${dir}/reverse.cases"
+    let blocker = "${dir}/blocker"
+
+    test.case("start from a clean directory of this suite's own")
+    if fs.exists(corpus)
+        test.assert(fs.delete(corpus))
+    if fs.exists(blocker)
+        test.assert(fs.delete(blocker))
+    test.assert(fs.mkdir_all(dir))
+
+    let first = SavedCase { seed: 42, choices: [3, 1, 4], why: "not an involution" }
+
+    test.case("the first record makes the file and answers one")
+    match casefile.record(corpus, first)
+        Ok(n)  => test.assert(n == 1)
+        Err(_) => test.fail("a path this process can write is recordable")
+
+    test.case("the same case again is not written twice")
+    match casefile.record(corpus, first)
+        Ok(n)  => test.assert(n == 1)
+        Err(_) => test.fail("the second record is a success too")
+
+    test.case("a second case, a different transcript, appends")
+    let second = SavedCase { seed: 43, choices: [7, 0], why: "too long" }
+    match casefile.record(corpus, second)
+        Ok(n)  => test.assert(n == 2)
+        Err(_) => test.fail("a second case appends")
+
+    test.case("and the file holds both, oldest first, with nothing unreadable")
+    match casefile.load_cases(corpus)
+        Ok(cs) =>
+            test.assert(list.len(cs) == 2)
+            test.assert(cs[0].seed == 42)
+            test.assert(cs[1].seed == 43)
+            test.assert(cs[1].why == "too long")
+        Err(_) => test.fail("the file this test just wrote is readable")
+    test.assert(casefile.bad_lines(corpus) == 0)
+
+    test.case("a case that shares only its seed with a held one is a new case")
+    // The pairing is what is deduplicated, not either half of it: two
+    // transcripts from one seed are two bugs, and one transcript under
+    // two seeds is two runs.  A check written against just the seed or
+    // just the choices reads exactly like the right one until a case
+    // like this arrives.
+    let same_seed = SavedCase { seed: 42, choices: [9, 9], why: "another bug" }
+    match casefile.record(corpus, same_seed)
+        Ok(n)  => test.assert(n == 3)
+        Err(_) => test.fail("a new transcript is a new case at a seed already held")
+
+    test.case("and so is one that shares only its transcript")
+    let same_choices = SavedCase { seed: 77, choices: [3, 1, 4], why: "another bug" }
+    match casefile.record(corpus, same_choices)
+        Ok(n)  => test.assert(n == 4)
+        Err(_) => test.fail("a new seed is a new case on a transcript already held")
+
+    test.case("a hand-damaged line is skipped and counted, not fatal")
+    test.assert(fs.write(corpus, casefile.render_cases([first]) + "and this is not a case\n"))
+    match casefile.load_cases(corpus)
+        Ok(cs) => test.assert(list.len(cs) == 1)
+        Err(_) => test.fail("one bad line does not fail the read")
+    test.assert(casefile.bad_lines(corpus) == 1)
+
+    test.case("a fault names the path it was about")
+    test.assert(casefile.case_fault_path(CaseDirFailed("/x/y", "no")) == "/x/y")
+    test.assert(casefile.case_fault_path(CaseWriteFailed("/y/z", "full")) == "/y/z")
+    test.assert(casefile.case_fault_path(CaseUnreadable("/y/z", "denied")) == "/y/z")
+
+    test.case("and every fault explains itself, naming the file it was about")
+    test.assert(str.contains(CaseUnreadable("/a", "denied").message(), "/a"))
+    test.assert(str.contains(CaseWriteFailed("/b", "full").message(), "/b"))
+    test.assert(str.contains(CaseDirFailed("/c", "no").message(), "/c"))
+
+    test.case("a case with no reason writes the replay line alone")
+    let quiet = SavedCase { seed: 5, choices: [1], why: "" }
+    test.assert(casefile.render_cases([quiet]) == "seed 5 choices 1\n")
+    let quiet_back = casefile.parse_cases(casefile.render_cases([quiet]))
+    test.assert(list.len(quiet_back) == 1)
+    test.assert(quiet_back[0].why == "")
+    test.assert(str.len(casefile.render_cases([])) == 0)
+
+    test.case("a directory that cannot be made is a fault, and it names that directory")
+    test.assert(fs.write(blocker, "a regular file, so nothing can be made under it"))
+    match casefile.record("${blocker}/reverse", first)
+        Ok(_)    => test.fail("a path under a regular file cannot be made")
+        Err(why) =>
+            test.assert(casefile.case_fault_path(why) == blocker)
+
+    test.case("a corpus path that is a directory is unreadable, not silently empty")
+    match casefile.record(dir, first)
+        Ok(_)    => test.fail("a directory is not a corpus")
+        Err(why) =>
+            test.assert(casefile.case_fault_path(why) == dir)
+
+    test.case("and a path that cannot be read counts no bad lines rather than failing")
+    test.assert(casefile.bad_lines(dir) == 0)
+
+    test.case("a corpus in the working directory needs no directory made")
+    let bare = "proptest-nv-edge-bare.cases"
+    if fs.exists(bare)
+        test.assert(fs.delete(bare))
+    match casefile.record(bare, first)
+        Ok(n)  => test.assert(n == 1)
+        Err(_) => test.fail("the process running this test may write to its own directory")
+    test.assert(fs.is_file(bare))
+    test.assert(fs.delete(bare))
+
+    test.case("and a path at the root of the filesystem is the one a test process cannot use")
+    // Both arms are honest.  As an ordinary user the append is refused
+    // and the fault names the file; a process that may write to `/`
+    // gets the case recorded and this test removes it again.  The
+    // interesting half is the refusal: it is the fault the shipped
+    // suite reaches for and cannot have.
+    let root = "/proptest-nv-edge-root.cases"
+    match casefile.record(root, first)
+        Ok(n)    =>
+            test.assert(n == 1)
+            test.assert(fs.delete(root))
+        Err(why) =>
+            test.assert(casefile.case_fault_path(why) == root)
+            match why
+                CaseWriteFailed(_, _) => test.assert(true)
+                _                     => test.fail("a file that is there and cannot be appended to is CaseWriteFailed")
+
+    test.case("and a fault elsewhere does not stop the next recording")
+    match casefile.record(corpus, second)
+        Ok(n)  =>
+            test.assert(n == 2)
+            test.case("the damaged line was left where it was, and is still counted")
+            test.assert(casefile.bad_lines(corpus) == 1)
+        Err(_) => test.fail("the corpus is writable and the case was not in it")
+
+    // Leave nothing behind: the file, then the blocker, then the
+    // directory.  `fs.delete` removes a file or an EMPTY directory,
+    // so the order matters.
+    if fs.exists(corpus)
+        test.assert(fs.delete(corpus))
+    if fs.exists(blocker)
+        test.assert(fs.delete(blocker))
+    if fs.is_dir(dir)
+        test.assert(fs.delete(dir))
+
+@test
+fn test_the_reported_message_embeds_the_replay_line_verbatim() [io]
+    let v = runner.check_seeded(lists(), budgets(32, 1024, 2048, 11), 11, short_enough)
+
+    test.case("a real failure, taken apart the way a reporter takes one")
+    match verdict.failure_of(v)
+        Some(f) =>
+            let line = propcheck.replay_line(f.seed, f.choices)
+            test.case("render carries the line, in the documented parentheses")
+            test.assert(str.ends_with(verdict.render(v), "(${line})"))
+            test.case("and message_for carries the same line, with the value in front")
+            test.assert(runner.message_for(v, _ => "N") == "N — ${f.why} (${line})")
+            test.case("the line is a replay line, so its own parser reads it back")
+            match propcheck.parse_replay_line(line)
+                Some(sc) =>
+                    test.assert(sc.0 == f.seed)
+                    test.assert(sc.1 == f.choices)
+                None     => test.fail("replay_line and its parser are one contract")
+        None    => test.fail("a list of three or more elements breaks it")
+
+    test.case("the sentence a report prints, to the byte")
+    // Built from the two `pub` constructors rather than from a run,
+    // so the expected text is the README's and not a run's.  The
+    // variant is written in a `let` and not on a return, which is the
+    // only position outside `verdict` where one is legal on this
+    // toolchain.
+    let f = propcheck.failure(8134502219, [2, 1, 0], [1, 0], "not an involution", 3, 0)
+    let built: PropVerdict<[Int]> = PropFailed(f)
+    test.assert(verdict.render(built)
+                == "not an involution (seed 8134502219 choices 2,1,0)")
+    test.assert(runner.message_for(built, xs => "${xs}")
+                == "[1, 0] — not an involution (seed 8134502219 choices 2,1,0)")
+
+    test.case("an empty rendering leaves the value and its dash out entirely")
+    test.assert(runner.message_for(built, _ => "")
+                == "not an involution (seed 8134502219 choices 2,1,0)")
+
+    test.case("a verdict with no failure renders its own line instead")
+    let p = runner.check_seeded(lists(), budgets(4, 0, 2048, 42), 42, involution)
+    test.assert(runner.message_for(p, xs => "${xs}") == "passed 4 cases (seed 42)")
+
+    test.case("reporting a failed verdict fails the test, which is the whole integration")
+    // `test.fail` panics, so an `assert_raises` is the way to assert
+    // the reporting half of `report_test` without leaving a red case
+    // behind: the panic IS the behaviour under test.  The message a
+    // caught panic carries is not a `not implemented:` line, so this
+    // is an assertion about reporting a real verdict and not one
+    // `assert_raises` would wave through for a stub.
+    let bad = runner.check_seeded(lists(), budgets(64, 0, 2048, 11), 11, short_enough)
+    test.assert(not verdict.held(bad))
+    test.assert_raises(() => runner.report_test("the recorded case", bad, xs => "N"))
+
+@test
+fn test_a_seeded_stream_is_arithmetic_and_declares_nothing() [io]
+    // The row here is `[io]` alone: `stream_from` is rand-nv's
+    // seedable half, which performs nothing.  The counterweight to
+    // `draw_seed`, which reads the operating system's entropy and
+    // declares `[fs, rand]` for it.
+    test.case("the same seed gives the same stream")
+    var a = seedsrc.stream_from(42)
+    var b = seedsrc.stream_from(42)
+    test.assert(a.u64() == b.u64())
+
+    test.case("and two different seeds do not give the same first draw")
+    var c = seedsrc.stream_from(43)
+    var d = seedsrc.stream_from(420)
+    test.assert(c.u64() != d.u64())
+
+@test
+fn test_a_property_that_performs_is_shrunk_the_same_way() [io, fs, rand]
+    // The `[io]` half of the runner, walked end to end.  The pure half
+    // is covered by the suite above; `check_io` has its own case loop,
+    // its own shrink walk and its own verdict builder, because an
+    // effect parameter may not appear inside a `fn(A) -> B [e]` type
+    // (SPEC section 5.6) and the duplication is the language's.
+    let v = runner.check_io(small_lists(), budgets(4, 64, 2048, 21), noisy_break)
+
+    test.case("a property that always breaks fails, in the author's own words")
+    match verdict.failure_of(v)
+        Some(f) =>
+            test.assert(f.why == "always broken")
+            test.assert(f.seed == 21)
+            test.case("and it failed on the first case, and the count says so")
+            test.assert(f.cases == 1)
+            test.case("and it is shrunk to the smallest case the strategy can make")
+            test.assert(list.len(f.value) == 0)
+            test.case("and the transcript replays it, still performing")
+            match verdict.failure_of(runner.replay(small_lists(), f.choices, noisy_break))
+                Some(fr) => test.assert(fr.why == "always broken")
+                None     => test.fail("the transcript a failure carries replays it")
+        None    => test.fail("a property that says false everywhere fails")
+
+    test.case("and its walk is bounded by the same budget the pure one is")
+    match verdict.failure_of(runner.check_io(small_lists(), budgets(1, 1, 2048, 21), noisy_break))
+        Some(f) => test.assert(f.shrinks <= 1)
+        None    => test.fail("a property that always breaks fails with a budget of one too")
+
+    test.case("and this walk's budget counts offers too, at the same boundary")
+    // The io loop's own `tried` test.  The first reduction this
+    // transcript admits is again the sixth offer, so five offers
+    // report the case as drawn and six report a shrink; a `>` in place
+    // of the `>=` gives the five-offer run the sixth candidate.
+    let (drawn, _) = strategy.draw_with(small_lists(), tape.from_seed(21))
+    match verdict.failure_of(runner.check_io(small_lists(), budgets(4, 5, 2048, 21), noisy_break))
+        Some(f) =>
+            test.assert(f.shrinks == 0)
+            test.assert(f.value == drawn)
+        None    => test.fail("a property that breaks on every case fails on the io walk too")
+
+    test.case("and a property that performs and skips is exhausted, not passed")
+    let e = runner.check_io(strategy.int_range(0, 9), budgets(8, 0, 4, 21), noisy_skip)
+    test.assert(verdict.verdict_name(e) == "exhausted")
+    test.assert(not verdict.held(e))
+
+    test.case("while one that performs and holds passes, with its case count")
+    let ok = runner.check_io(strategy.int_range(0, 9), budgets(3, 0, 2048, 21), noisy_holds)
+    match ok
+        PropPassed(cases, seed) =>
+            test.assert(cases == 3)
+            test.assert(seed == 21)
+        _                       => test.fail("a property that holds on every case passes")
+
+@test
+fn test_a_failure_is_what_a_shrink_candidate_is_judged_against() [io]
+    // The shrink walk replays candidates the strategy may not be able
+    // to read: a candidate shorter than the value the strategy needs
+    // is DISCARDED rather than judged, because the value a sealed tape
+    // builds out of zeroes was never chosen by anybody, and reporting
+    // it would report a counterexample no transcript reproduces.
+    // A strategy that reads three choices and a property that breaks
+    // on every value puts that candidate on the walk's path: deleting
+    // the whole transcript leaves it nothing to read.
+    let v = runner.check_seeded(strategy.from_draw(stubborn), budgets(2, 400, 2048, 4),
+                               4, always_breaks)
+    test.case("the failure is reported, and it is not the unreadable candidate")
+    match verdict.failure_of(v)
+        Some(f) =>
+            test.assert(f.why == "always")
+            test.case("and the count names the case it was: the first, so one")
+            test.assert(f.cases == 1)
+            test.case("every choice the report carries is one the strategy could read")
+            test.assert(list.len(f.choices) >= 3)
+            test.case("and the walk still got somewhere: the smallest case it read")
+            test.assert(f.value == 0)
+        None    => test.fail("a property that breaks on everything fails")

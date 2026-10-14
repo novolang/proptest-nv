@@ -25,6 +25,8 @@
 // it does not print, and a library does not decide that something
 // appears on a console.
 
+use propcheck
+
 // One recorded case.
 //
 // ```novo
@@ -67,9 +69,16 @@ pub enum CaseFileFault
 // The `Error` trait's method, which is what `Result<_, CaseFileFault>`
 // requires.
 impl Error for CaseFileFault
-    // Panics with `not implemented` until the bodies land.
+    // Answer the one line: which file, and what went wrong with it.
+    //
+    // The path comes first and the reason second, because the path is
+    // what a reader acts on — it is the thing to go and look at — and
+    // the reason is the library's guess at why.
     fn message(self) -> Str
-        todo("proptest-nv.CaseFileFault.message")
+        match self
+            CaseUnreadable(path, why)  => "proptest-nv: cannot read the case file ${path}: ${why}"
+            CaseWriteFailed(path, why) => "proptest-nv: cannot write the case file ${path}: ${why}"
+            CaseDirFailed(path, why)   => "proptest-nv: cannot make the directory ${path}: ${why}"
 
 // The path a fault is about.
 //
@@ -80,7 +89,122 @@ impl Error for CaseFileFault
 //     println(casefile.case_fault_path(CaseWriteFailed("/x", "full")))
 // ```
 pub fn case_fault_path(f: CaseFileFault) -> Str
-    todo("proptest-nv.casefile.case_fault_path")
+    match f
+        CaseUnreadable(path, _)  => path
+        CaseWriteFailed(path, _) => path
+        CaseDirFailed(path, _)   => path
+
+// ── private helpers ──────────────────────────────────────────────────
+
+// The separator between a case's replay line and its reason.
+//
+// A space, an em dash and a space — five bytes, and `SEPARATOR_BYTES`
+// is that number written down, because the parse below needs the
+// reason's byte offset and `str.index` answers bytes.  A reason of a
+// caller's own may contain the separator itself; the parse splits at
+// the FIRST one, so everything after it stays in the reason.
+const SEPARATOR = " — "
+const SEPARATOR_BYTES = 5
+
+// A reason as one line.
+//
+// A saved case is one LINE of a file, so a reason with a newline in it
+// would write a second line that does not parse and would be counted
+// by `bad_lines` as damage this module caused.  Newlines become
+// spaces; a carriage return is dropped rather than turned into a
+// trailing space, because a reason is usually written with `\n` on a
+// platform that also has `\r\n`.
+fn one_line(why: Str) -> Str
+    str.replace_all(str.replace_all(why, "\r", ""), "\n", " ")
+
+// One saved case as the text the file holds.
+//
+// `propcheck.replay_line`'s spelling, plus the reason when there is
+// one.  README rule 11: one format, three uses — this is the line the
+// failure report prints, the line the file holds, and the text a
+// person pastes back.
+fn case_line(c: SavedCase) -> Str
+    let head = propcheck.replay_line(c.seed, c.choices)
+    let why = one_line(c.why)
+    if why == ""
+        return head
+    "${head}${SEPARATOR}${why}"
+
+// A saved case from one line of text, or `None` if the line is not a
+// case.
+//
+// The reason is optional: a corpus a person edited by hand, or one
+// written by a tool that had no reason to record, is still a corpus.
+fn parse_case_line(line: Str) -> ?SavedCase
+    let text = str.trim(line)
+    if text == ""
+        return None
+    match str.index(text, SEPARATOR)
+        None     => parse_replay(text, "")
+        Some(at) => parse_replay(str.slice(text, 0, at),
+                                 str.slice(text, at + SEPARATOR_BYTES, str.len(text)))
+
+// A saved case from a replay line and the reason that followed it.
+fn parse_replay(head: Str, why: Str) -> ?SavedCase
+    match propcheck.parse_replay_line(head)
+        Some(sc) => Some(SavedCase { seed: sc.0, choices: sc.1, why: why })
+        None     => None
+
+// Whether a line of a file is one `load_cases` reads.
+//
+// A blank line counts as readable: it is not a case, and a file with a
+// trailing newline has one.  Counting it as damage would make every
+// file this module writes report a bad line.
+fn readable_line(line: Str) -> Bool
+    if str.trim(line) == ""
+        return true
+    match parse_case_line(line)
+        Some(_) => true
+        None    => false
+
+// Whether the corpus already holds this case.
+//
+// The transcript is the identity, not the seed and not the reason: two
+// runs of the same property find the same choice sequence, and a case
+// whose reason text was edited is the same bug.
+fn holds_case(known: [SavedCase], c: SavedCase) -> Bool
+    for k in known
+        if k.choices == c.choices and k.seed == c.seed
+            return true
+    false
+
+// The directory a path lives in, or `""` when it names a file in the
+// working directory.
+//
+// Written by splitting rather than by searching backwards for a
+// separator, because `str` has no reverse index: `str.index_from` only
+// walks forwards.  The empty leading field an absolute path gives is
+// kept and rejoined, which is what puts the leading slash back.
+fn parent_of(path: Str) -> Str
+    let parts = str.split(path, "/")
+    if list.len(parts) <= 1
+        return ""
+    let cut = list.len(parts) - 1
+    let head = str.join(parts[:cut], "/")
+    if head == "" and str.starts_with(path, "/")
+        return "/"
+    head
+
+// Append one case, making the directory and the file if they are not
+// there.
+//
+// `fs.append` creates the file when it is absent, so the only thing
+// that has to be made by hand is the directory — and `mkdir_all` is
+// the one that makes the whole chain, which is what a path like
+// `.proptest/regressions/reverse` needs.
+fn append_case(path: Str, known: [SavedCase], c: SavedCase) -> Result<Int, CaseFileFault> [fs]
+    let dir = parent_of(path)
+    if dir != "" and not fs.is_dir(dir)
+        if not fs.mkdir_all(dir)
+            return Err(CaseDirFailed(dir, "the directory could not be made"))
+    if not fs.append(path, case_line(c) + "\n")
+        return Err(CaseWriteFailed(path, "the file is there and could not be appended to"))
+    Ok(list.len(known) + 1)
 
 // The cases a file holds, oldest first.
 //
@@ -98,7 +222,11 @@ pub fn case_fault_path(f: CaseFileFault) -> Str
 //         Err(_) => 0 - 1
 // ```
 pub fn load_cases(path: Str) -> Result<[SavedCase], CaseFileFault> [fs]
-    todo("proptest-nv.casefile.load_cases")
+    if not fs.exists(path)
+        return Ok([])
+    match fs.read(path)
+        Some(text) => Ok(parse_cases(text))
+        None       => Err(CaseUnreadable(path, "the file is there and could not be read"))
 
 // Append one case, creating the file and its directory if needed.
 //
@@ -116,7 +244,12 @@ pub fn load_cases(path: Str) -> Result<[SavedCase], CaseFileFault> [fs]
 //     casefile.record(path, c)
 // ```
 pub fn record(path: Str, c: SavedCase) -> Result<Int, CaseFileFault> [fs]
-    todo("proptest-nv.casefile.record")
+    match load_cases(path)
+        Err(f)    => Err(f)
+        Ok(known) =>
+            if holds_case(known, c)
+                return Ok(list.len(known))
+            append_case(path, known, c)
 
 // How many lines of a file did not parse.
 //
@@ -130,7 +263,16 @@ pub fn record(path: Str, c: SavedCase) -> Result<Int, CaseFileFault> [fs]
 //     println("${casefile.bad_lines(".proptest/reverse")}")
 // ```
 pub fn bad_lines(path: Str) -> Int [fs]
-    todo("proptest-nv.casefile.bad_lines")
+    if not fs.exists(path)
+        return 0
+    match fs.read(path)
+        None    => 0
+        Some(t) =>
+            var n = 0
+            for line in str.lines(t)
+                if not readable_line(line)
+                    n = n + 1
+            n
 
 // A file's cases as text, in the format `load_cases` reads.
 //
@@ -146,7 +288,9 @@ pub fn bad_lines(path: Str) -> Int [fs]
 //     println(casefile.render_cases([c]))
 // ```
 pub fn render_cases(cs: [SavedCase]) -> Str
-    todo("proptest-nv.casefile.render_cases")
+    if list.len(cs) == 0
+        return ""
+    str.join(list.map(cs, c => case_line(c)), "\n") + "\n"
 
 // Cases back out of text.  **No effects.**
 //
@@ -162,4 +306,8 @@ pub fn render_cases(cs: [SavedCase]) -> Str
 //     list.len(casefile.parse_cases(text))
 // ```
 pub fn parse_cases(text: Str) -> [SavedCase]
-    todo("proptest-nv.casefile.parse_cases")
+    var out: [SavedCase] = []
+    for line in str.lines(text)
+        if let Some(c) = parse_case_line(line)
+            list.push(out, c)
+    out

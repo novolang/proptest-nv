@@ -1,8 +1,7 @@
 // casefile_tests.nv — the API suite for the persisted failure file
 // and the seed source.
 //
-// RED ON PURPOSE: every body is a `todo()`.  Run with `--isolate` for
-// one verdict per `@test`.
+// Run with `--isolate` for one verdict per `@test`.
 //
 // WHAT THESE CASES PIN.  The two decisions this package makes about
 // the machine — that the corpus is off by default and that the seed is
@@ -10,14 +9,11 @@
 // `parse_cases` and `render_cases` declare nothing, so the corpus
 // format is testable against a fixture string with no file on disk.
 //
-// THE RUNNER SUITE IS NOT HERE.  It is in `runner_tests.nv`, which
-// does not compile on this toolchain: every entry takes a
-// `PropStrategy<T>` from proptest-core-nv, and a generic function whose
-// signature applies a generic head is not emitted for a call from
-// another module.  That file's own header has the detail.
+// THE RUNNER SUITE IS NOT HERE.  It is in `runner_tests.nv`.
 
 use std.test
 use std.list
+use std.fs
 use casefile
 use seedsrc
 use runner
@@ -104,9 +100,22 @@ fn test_recording_appends_and_deduplicates() [io, fs]
     let c = SavedCase { seed: 42, choices: [3, 1, 4], why: "not an involution" }
 
     test.case("the first record makes the file")
-    match casefile.record("/nonexistent/proptest/reverse", c)
+    // A directory under /tmp that this case makes and removes, so the
+    // file is new and the directory has to be created.
+    let dir = "/tmp/proptest-nv-casefile-record"
+    let path = dir + "/reverse"
+    let _ = fs.delete(path)
+    let _ = fs.delete(dir)
+    match casefile.record(path, c)
         Ok(n)  => test.assert(n == 1)
-        Err(_) => test.fail("this case reaches not implemented before the file")
+        Err(f) => test.fail(casefile.case_fault_path(f))
+
+    test.case("and the same case recorded again is not written twice")
+    match casefile.record(path, c)
+        Ok(n)  => test.assert(n == 1)
+        Err(f) => test.fail(casefile.case_fault_path(f))
+    test.assert(fs.delete(path))
+    test.assert(fs.delete(dir))
 
     test.case("a fault names the path it was about")
     test.assert(casefile.case_fault_path(CaseWriteFailed("/x", "full")) == "/x")

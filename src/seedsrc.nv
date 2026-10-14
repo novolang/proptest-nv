@@ -20,6 +20,11 @@
 // than a clock reading, because a clock reading is a second source of
 // non-determinism arriving where the first one was removed.
 
+// `runner` is named below without a `use` line: it imports this module,
+// and the pair is refused as a cycle
+// (language/a-package-module-resolves-a-sibling-s-name-that-it-cannot-import).
+use rng
+
 // A seed from the operating system's entropy, or `None`.
 //
 // The raw call, `pub` because a program that wants to log the seed
@@ -34,7 +39,7 @@
 //         None    => println("no entropy on this platform")
 // ```
 pub fn draw_seed() -> ?Int [fs, rand]
-    todo("proptest-nv.seedsrc.draw_seed")
+    rng.os_u64()
 
 // A seed from the operating system, or the fallback.
 //
@@ -50,7 +55,29 @@ pub fn draw_seed() -> ?Int [fs, rand]
 //     println("${seedsrc.draw_or(1)}")
 // ```
 pub fn draw_or(fallback: Int) -> Int [fs, rand]
-    todo("proptest-nv.seedsrc.draw_or")
+    match draw_seed()
+        Some(s) => s
+        // The arm below needs a platform that WILL NOT answer, and
+        // that is an environment, not an input: rand-nv's device is
+        // `/dev/urandom` with no override, so on every host this
+        // package runs on the draw succeeds and the fallback is never
+        // taken.  The fallback is kept rather than deleted because
+        // `None` is part of the call's contract, and a caller reading
+        // this function needs to see what happens when it arrives.
+        // cov: skip — no host this package supports lacks entropy
+        None    => fallback
+
+// The seed `seed_for` falls back to when the platform keeps no
+// entropy.
+//
+// One, and not zero, so that a run which never saw a seed it drew is
+// distinguishable in a log from a run whose caller passed zero — the
+// only two ways `seed_of` can answer 0 otherwise.  It is a single
+// constant for a whole program, so every property in a test run that
+// could not read entropy gets the same cases; that is the trade
+// rule 7 of the README makes on purpose, because a clock reading would
+// replace one source of non-determinism with another.
+const NO_ENTROPY_FALLBACK = 1
 
 // The seed a configuration says to use, drawing one if it does not say.
 //
@@ -67,7 +94,9 @@ pub fn draw_or(fallback: Int) -> Int [fs, rand]
 //     println("${seedsrc.seed_for(runner.defaults())}")
 // ```
 pub fn seed_for(cfg: PropConfig) -> Int [fs, rand]
-    todo("proptest-nv.seedsrc.seed_for")
+    match cfg.seed
+        Some(s) => s
+        None    => draw_or(NO_ENTROPY_FALLBACK)
 
 // A deterministic stream from a seed, for a caller that wants one.
 //
@@ -85,4 +114,4 @@ pub fn seed_for(cfg: PropConfig) -> Int [fs, rand]
 //     println("${a.u64() == b.u64()}")
 // ```
 pub fn stream_from(seed: Int) -> Rng
-    todo("proptest-nv.seedsrc.stream_from")
+    rng.seeded(seed)

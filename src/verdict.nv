@@ -41,6 +41,39 @@ pub enum PropVerdict<T>
     // how many did not.
     PropExhausted(ran: Int, skipped: Int, seed: Int)
 
+// ── the constructors, which have to be written here ──────────────────
+
+// The three variants, built where they are declared.
+//
+// A `PropVerdict` is built in this module and nowhere else, and that is
+// a compiler defect and not a design decision.  Outside the module
+// declaring a generic enum, a variant written on a RETURN — a
+// function's tail expression, or a match arm that is one — is not
+// closed to its instantiation: the payload variant reaches codegen as
+// an undefined `@novo_user_<building module>.<Variant>` and stops the
+// build at the LLVM verifier, and a unit variant is refused earlier
+// with `E2003: undefined name`.  `runner` builds all three exactly
+// there, and the first sign of it was
+// `use of undefined value '@novo_user_runner.PropExhausted'`.
+//
+// A constructor beside the enum closes from its own return type, which
+// does work in the declaring module, and a call to it is an ordinary
+// call from anywhere — so `runner` reaches the variants through these
+// three.  They are deliberately NOT `pub`: a sibling module in this
+// package calls them either way, so the workaround costs the published
+// surface nothing.  Recorded as
+// `a-generic-enum-variant-outside-its-declaring-module-is-undefined-on-a-return`;
+// when that filing closes, these three and the calls to them are what
+// to revert.
+fn passed<T>(cases: Int, seed: Int) -> PropVerdict<T>
+    PropPassed(cases, seed)
+
+fn failed<T>(f: PropFailure<T>) -> PropVerdict<T>
+    PropFailed(f)
+
+fn exhausted<T>(ran: Int, skipped: Int, seed: Int) -> PropVerdict<T>
+    PropExhausted(ran, skipped, seed)
+
 // The name of a verdict: `"passed"`, `"failed"`, `"exhausted"`.
 //
 // ```novo
@@ -50,7 +83,10 @@ pub enum PropVerdict<T>
 //     verdict.verdict_name(v)
 // ```
 pub fn verdict_name<T>(v: PropVerdict<T>) -> Str
-    todo("proptest-nv.verdict.verdict_name")
+    match v
+        PropPassed(_, _)       => "passed"
+        PropFailed(_)          => "failed"
+        PropExhausted(_, _, _) => "exhausted"
 
 // Whether a verdict is a pass.
 //
@@ -65,7 +101,9 @@ pub fn verdict_name<T>(v: PropVerdict<T>) -> Str
 //     verdict.held(v)
 // ```
 pub fn held<T>(v: PropVerdict<T>) -> Bool
-    todo("proptest-nv.verdict.held")
+    match v
+        PropPassed(_, _) => true
+        _                => false
 
 // The seed behind any verdict.
 //
@@ -76,7 +114,10 @@ pub fn held<T>(v: PropVerdict<T>) -> Bool
 //     verdict.seed_of(v)
 // ```
 pub fn seed_of<T>(v: PropVerdict<T>) -> Int
-    todo("proptest-nv.verdict.seed_of")
+    match v
+        PropPassed(_, seed)       => seed
+        PropFailed(f)             => f.seed
+        PropExhausted(_, _, seed) => seed
 
 // The failure inside a `PropFailed`, or `None`.
 //
@@ -89,7 +130,31 @@ pub fn seed_of<T>(v: PropVerdict<T>) -> Int
 //         None    => "nothing broke"
 // ```
 pub fn failure_of<T>(v: PropVerdict<T>) -> ?PropFailure<T>
-    todo("proptest-nv.verdict.failure_of")
+    match v
+        PropFailed(f) => Some(f)
+        _             => None
+
+// ── the three lines a verdict renders ────────────────────────────────
+
+// Why two of `render`'s three lines are written out in its own arms.
+//
+// The obvious shape is one private helper per verdict, and it does not
+// build: a private generic function called from a public generic
+// function is not specialised for the instantiation, so `render<[Int]>`
+// calling `failed_line<T>(f: PropFailure<T>)` is refused with
+// "expected PropFailure<T> but got PropFailure<[Int]>".  The arms are
+// therefore written in `render` itself, and only the exhausted line —
+// which mentions no type parameter — is a helper.  Recorded as
+// `generic-forwarding-to-a-package-generic-skips-monomorphisation`.
+
+// The line an exhausted run renders.
+//
+// Both counts are printed.  "exhausted" alone leaves the reader
+// wondering whether the generator produced nothing or the property
+// refused everything, and those two want different fixes: a `filter`
+// that is too tight, or an `assumed` that is never true.
+fn exhausted_line(ran: Int, skipped: Int, seed: Int) -> Str
+    "exhausted: ${ran} cases ran and ${skipped} were skipped (seed ${seed})"
 
 // A verdict as the message a person reads, without the value.
 //
@@ -107,4 +172,18 @@ pub fn failure_of<T>(v: PropVerdict<T>) -> ?PropFailure<T>
 //     verdict.render(v)
 // ```
 pub fn render<T>(v: PropVerdict<T>) -> Str
-    todo("proptest-nv.verdict.render")
+    match v
+        // The seed is here even though nothing failed, and that is
+        // README rule 3: a run that passed today and fails tomorrow is
+        // worth re-running at yesterday's seed, and a seed nobody
+        // recorded is a seed nobody has.  `cases` is what makes the
+        // line worth keeping — a pass of 3 cases and a pass of 256 are
+        // different amounts of evidence.
+        PropPassed(cases, seed)           => "passed ${cases} cases (seed ${seed})"
+        // `propcheck.replay_line` is embedded rather than reformatted,
+        // because README rule 11 says the line a report prints, the
+        // line a case file holds and the text a person pastes back are
+        // ONE spelling.  A second spelling here would make the file and
+        // the log disagree the first time either changed.
+        PropFailed(f)                     => "${f.why} (${propcheck.replay_line(f.seed, f.choices)})"
+        PropExhausted(ran, skipped, seed) => exhausted_line(ran, skipped, seed)

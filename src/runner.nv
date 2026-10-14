@@ -42,6 +42,24 @@
 // compile, so the surface is two named entries with two honest rows
 // rather than one with a variable.
 
+// A shrink candidate, imported by name rather than written
+// `shrink.ShrinkTry`, because a struct literal whose type is spelled
+// with a module qualifier does not parse: the qualified spelling is
+// `E1002 parse error near '{'`, while the bare name is a literal.
+// The runner is the one place that has to build one — every other
+// `ShrinkTry` in the package is made by `shrink.next_try` — so the
+// selective import sits here and nowhere else.  Recorded as
+// `a-qualified-struct-literal-is-a-parse-error`, whose fix is
+// `fixed_in: 0.20.3` and therefore not in the installed 0.20.2; the
+// import folds back into the qualified spelling when this package's
+// `novo` floor reaches it.
+use propcheck
+use seedsrc
+use shrink.{ ShrinkTry }
+use strategy
+use tape
+use verdict
+
 // How a run is configured.
 //
 // ```novo
@@ -81,7 +99,7 @@ pub struct PropConfig
 //     println("${runner.defaults().max_shrinks}")
 // ```
 pub fn defaults() -> PropConfig
-    todo("proptest-nv.runner.defaults")
+    PropConfig { cases: 256, max_shrinks: 1024, max_skips: 2048, seed: None, case_file: None }
 
 // The same configuration with a fixed seed.
 //
@@ -97,7 +115,8 @@ pub fn defaults() -> PropConfig
 //         None    => println("no seed")
 // ```
 pub fn with_seed(cfg: PropConfig, seed: Int) -> PropConfig
-    todo("proptest-nv.runner.with_seed")
+    PropConfig { cases: cfg.cases, max_shrinks: cfg.max_shrinks, max_skips: cfg.max_skips,
+                 seed: Some(seed), case_file: cfg.case_file }
 
 // The same configuration with a different case count.
 //
@@ -108,7 +127,8 @@ pub fn with_seed(cfg: PropConfig, seed: Int) -> PropConfig
 //     println("${runner.with_cases(runner.defaults(), 1000).cases}")
 // ```
 pub fn with_cases(cfg: PropConfig, cases: Int) -> PropConfig
-    todo("proptest-nv.runner.with_cases")
+    PropConfig { cases: cases, max_shrinks: cfg.max_shrinks, max_skips: cfg.max_skips,
+                 seed: cfg.seed, case_file: cfg.case_file }
 
 // The same configuration with a failure file.
 //
@@ -123,7 +143,353 @@ pub fn with_cases(cfg: PropConfig, cases: Int) -> PropConfig
 //         None    => println("no case file")
 // ```
 pub fn with_case_file(cfg: PropConfig, path: Str) -> PropConfig
-    todo("proptest-nv.runner.with_case_file")
+    PropConfig { cases: cfg.cases, max_shrinks: cfg.max_shrinks, max_skips: cfg.max_skips,
+                 seed: cfg.seed, case_file: Some(path) }
+
+// ── private helpers ──────────────────────────────────────────────────
+
+// What one case did when it was replayed.
+//
+// FOUR ANSWERS WHERE `PropCheck` HAS THREE, and the fourth is the
+// reason this type exists.  "The transcript ran out" is not something
+// a property can say: a property sees a value, and the value a sealed
+// tape produces once the strategy reads past its end is built half
+// from choices and half from the zeroes `tape.next` hands back.  That
+// value was never chosen by anybody, so judging it reports a
+// counterexample no transcript reproduces.  `CaseOverran` is the
+// runner's own answer for a case it refuses to put to the property,
+// and it is counted like a skip, because a case that proved nothing is
+// a case that proved nothing.
+enum CaseOutcome
+    // The property held on the value.
+    CaseHeld
+    // The property refused the value, in the author's own words.
+    CaseBroke(why: Str)
+    // The property skipped it: the case did not meet the precondition.
+    CaseSkipped
+    // The tape ended before the strategy did.  Not judged.
+    CaseOverran
+
+// Replay one tape through the strategy and judge what comes out.
+//
+// The overrun check is separate from the match and comes first,
+// because `strategy.draw_with` cannot fail: a sealed tape answers with
+// zeroes rather than an error, so the only place the overrun is
+// visible is on the tape that comes back.
+//
+// `outcome_of_io` below is the same function with the property's row,
+// and they cannot be one function — SPEC § 5.6 says an effect
+// parameter may not appear inside a `fn(A) -> B [e]` type, so a
+// parameter that varies over the property's effects has no spelling.
+// The duplication is the language's, not a choice made here.
+fn outcome_of<T>(g: PropStrategy<T>, prop: fn(T) -> PropCheck, t: Tape) -> CaseOutcome
+    let (v, t2) = strategy.draw_with(g, t)
+    if tape.is_overrun(t2)
+        return CaseOverran
+    // `let c = prop(v)` first, and the match on the BINDING rather than
+    // on the call.  A match written directly on the result of a call
+    // through a fn-typed value strands the cell the callee allocated —
+    // one per case, which is one per case the strategy ever draws.  The
+    // binding owns it and takes the ordinary scope-end drop.  Measured
+    // on the installed 0.20.2, which does not carry the fix; the shape
+    // is `a-match-that-rebuilds-the-result-of-a-call-through-a-fn-typed-struct-field-leaks`,
+    // whose fix covers a fn-typed PARAMETER with no struct in sight and
+    // lands in 0.20.3.  Fold these three bindings back into the matches
+    // when this package's `novo` floor reaches 0.20.3.  The CHANGELOG's
+    // `### Known` carries the measurements.
+    let c = prop(v)
+    match c
+        PropBroke(why) => CaseBroke(why)
+        PropSkip       => CaseSkipped
+        PropHolds      => CaseHeld
+
+// `outcome_of` for a property that performs.
+fn outcome_of_io<T>(g: PropStrategy<T>, prop: fn(T) -> PropCheck [io], t: Tape) -> CaseOutcome [io]
+    let (v, t2) = strategy.draw_with(g, t)
+    if tape.is_overrun(t2)
+        return CaseOverran
+    // The same binding as `outcome_of`, for the same reason; see there.
+    let c = prop(v)
+    match c
+        PropBroke(why) => CaseBroke(why)
+        PropSkip       => CaseSkipped
+        PropHolds      => CaseHeld
+
+// The failure a case at this attempt describes, drawn a second time.
+//
+// A second draw and not a saved value, because `tape.from_seed` is a
+// pure function of the seed: the same attempt gives the same tape,
+// the same value and the same transcript, so the two draws cannot
+// disagree.  It costs one case's work, once per run, and it keeps the
+// case loop's own state three integers wide.
+fn failure_at<T>(g: PropStrategy<T>, seed: Int, attempt: Int, why: Str,
+                 cases: Int) -> PropFailure<T>
+    let (v, t) = strategy.draw_with(g, tape.from_seed(seed + attempt))
+    propcheck.failure(seed, tape.choices_of(t), v, why, cases, 0)
+
+// What a case loop counted, and what it found.
+//
+// `hit` is the RAW failure, exactly as the case that broke produced
+// it: the shrinking walk has not run yet, and `shrinks` is 0 until it
+// has.  Kept apart from the walk so that a run which never shrinks
+// anything and a run whose budget ran out are the same code path.
+struct Tally<T>
+    // The first case that broke, or `None` if none did.
+    hit: ?PropFailure<T>
+    // How many cases reached the property and were judged.
+    ran: Int
+    // How many did not: a `PropSkip`, or a case the tape ended under.
+    skipped: Int
+
+// Run cases until one breaks, the case budget is spent, or too many
+// cases have been skipped to conclude anything.
+//
+// ONE TAPE PER ATTEMPT, seeded `seed + attempt`, rather than one long
+// tape: a case is then reproducible on its own, and a failing case's
+// transcript starts at its own beginning instead of a thousand draws
+// into a shared stream.
+//
+// The loop's two bounds are the two numbers in `PropConfig` that are
+// not budgets of time: `cases` counts cases that REACHED the
+// property, and `max_skips` counts the ones that did not.  A discard
+// is not a case — Hypothesis's rule, and the reason a `filter` that
+// throws away nine cases in ten still runs the number of cases it was
+// asked for.
+fn scan<T>(g: PropStrategy<T>, cfg: PropConfig, seed: Int, prop: fn(T) -> PropCheck) -> Tally<T>
+    var ran = 0
+    var skipped = 0
+    var attempt = 0
+    var stop = false
+    var hit: ?PropFailure<T> = None
+    while not stop
+        if ran >= cfg.cases or skipped >= cfg.max_skips
+            stop = true
+        else
+            match outcome_of(g, prop, tape.from_seed(seed + attempt))
+                CaseHeld       =>
+                    ran = ran + 1
+                    attempt = attempt + 1
+                CaseBroke(why) =>
+                    hit = Some(failure_at(g, seed, attempt, why, ran + 1))
+                    stop = true
+                CaseSkipped    =>
+                    skipped = skipped + 1
+                    attempt = attempt + 1
+                // This loop cannot reach the arm below.  It plays one
+                // unsealed tape per attempt — `tape.from_seed` — and an
+                // unsealed tape never reports an overrun: `tape.next`
+                // keeps drawing from its own state instead of running
+                // out.  `CaseOverran` is an answer only a SEALED tape
+                // can produce, which is why the shrink walk and
+                // `replay` must handle it and this loop cannot meet it.
+                // cov: skip — unreachable from `scan`, whose tapes are unsealed
+                CaseOverran    =>
+                    skipped = skipped + 1
+                    attempt = attempt + 1
+    Tally { hit: hit, ran: ran, skipped: skipped }
+
+// `scan` for a property that performs.
+fn scan_io<T>(g: PropStrategy<T>, cfg: PropConfig, seed: Int,
+              prop: fn(T) -> PropCheck [io]) -> Tally<T> [io]
+    var ran = 0
+    var skipped = 0
+    var attempt = 0
+    var stop = false
+    var hit: ?PropFailure<T> = None
+    while not stop
+        if ran >= cfg.cases or skipped >= cfg.max_skips
+            stop = true
+        else
+            match outcome_of_io(g, prop, tape.from_seed(seed + attempt))
+                CaseHeld       =>
+                    ran = ran + 1
+                    attempt = attempt + 1
+                CaseBroke(why) =>
+                    hit = Some(failure_at(g, seed, attempt, why, ran + 1))
+                    stop = true
+                CaseSkipped    =>
+                    skipped = skipped + 1
+                    attempt = attempt + 1
+                // The same arm, for the same reason as `scan`'s: this
+                // loop plays `tape.from_seed` tapes, which are unsealed
+                // and therefore cannot overrun.
+                // cov: skip — unreachable from `scan_io`, whose tapes are unsealed
+                CaseOverran    =>
+                    skipped = skipped + 1
+                    attempt = attempt + 1
+    Tally { hit: hit, ran: ran, skipped: skipped }
+
+// The verdict a case loop with no failure in it answers.
+//
+// A loop that spent its case budget passed; a loop that ran out of
+// tolerated skips did not, and gets the third verdict.  The test is
+// `ran >= cfg.cases` and not `skipped == 0`, because a run that
+// skipped a few cases on the way to its case count is a run that
+// finished — and a run that skipped everything is not.
+//
+// There is no failure arm here, and that is not an omission: `t.hit`
+// is `None` at every call, because both callers test it first and
+// build the shrunk failure themselves — `verdict_pure` and
+// `verdict_io`.  A `Some` arm would be a branch no run could reach,
+// which is a thing this package's coverage measures rather than
+// assumes.
+//
+// Each arm binds its answer before returning it, and that is not a
+// style choice: a call whose type parameter appears only in its own
+// answer type is closed from an annotated `let` and NOT from an arm —
+// neither the arm of a `match` that is the function's tail nor the arm
+// of an `if` inside one.  The sites below are refused with `E2016:
+// cannot infer 'T' for 'passed'` without the binding, and the
+// diagnostic's own hint names the tail expression as a closing
+// position.  Recorded as
+// `expected-type-closure-stops-at-the-arms-of-a-match-or-an-if`.
+fn verdict_of<T>(t: Tally<T>, cfg: PropConfig, seed: Int) -> PropVerdict<T>
+    if t.ran >= cfg.cases
+        let v: PropVerdict<T> = verdict.passed(t.ran, seed)
+        v
+    else
+        let v: PropVerdict<T> = verdict.exhausted(t.ran, t.skipped, seed)
+        v
+
+// The transcript a strategy actually consumed, replaying `choices`.
+//
+// Not the same list as `choices` whenever the strategy reads fewer
+// choices than the transcript holds, which is every candidate a
+// shrink pass produces by deleting a span the strategy never reaches.
+// The consumed prefix is what a failure should report: it is what
+// `runner.replay` will read, and it is shorter than the candidate, so
+// keeping it is a strict decrease under `shrink.simpler_than` rather
+// than a no-op.
+//
+// Only called on a candidate that was judged, so the tape it replays
+// cannot overrun — an overrun candidate never reaches this call.
+fn consumed<T>(g: PropStrategy<T>, choices: [Int]) -> [Int]
+    let (_, t) = strategy.draw_with(g, tape.replay_of(choices))
+    tape.choices_of(t)
+
+// Whether a candidate broke the property the same way the original
+// case did.
+//
+// The SAME WAY, and not merely "also broke": a shrink that turns one
+// bug into a different one reports the smaller case as though it were
+// the original, and the reason line then describes something the
+// reader was never shown.  Requiring the author's own words to match
+// is the cheapest faithful test of "the same" this package can make,
+// and it is what makes the reported `why` exactly the one the run
+// started with.
+fn same_bug(o: CaseOutcome, why: Str) -> Bool
+    match o
+        CaseBroke(w) => w == why
+        _            => false
+
+// Walk the shrink passes until the walk is done or the budget is spent.
+//
+// `shrink.plan_from` starts from the failing transcript and
+// `shrink.next_try` offers a candidate simpler than the best it holds,
+// so the walk can only ever improve `best`.  The two stops are the
+// plan's own `None` — no pass can offer anything simpler — and the
+// budget: `max_shrinks` counts candidates OFFERED, so a walk that
+// keeps finding smaller cases still stops, and a run cannot spend
+// unbounded time on a property whose search never settles.  Both
+// `shrink.keep` and `shrink.reject` raise that count, so the budget
+// alone terminates this loop whatever the plan does.
+//
+// The transcript handed back to `keep` is the one the replay
+// consumed, not the candidate — see `consumed`.  `keep` compares it
+// with `shrink.simpler_than`, so a candidate that is not actually
+// shorter is ignored rather than adopted.
+fn shrink_pure<T>(g: PropStrategy<T>, prop: fn(T) -> PropCheck, cfg: PropConfig, seed: Int,
+                  why: Str, cases: Int, choices: [Int]) -> PropFailure<T>
+    var plan = shrink.plan_from(choices)
+    var walking = true
+    while walking
+        if shrink.tried_of(plan) >= cfg.max_shrinks
+            walking = false
+        else
+            match shrink.next_try(plan)
+                None          =>
+                    walking = false
+                Some(attempt) =>
+                    if same_bug(outcome_of(g, prop, tape.replay_of(attempt.candidate)), why)
+                        plan = shrink.keep(plan, ShrinkTry {
+                            candidate: consumed(g, attempt.candidate),
+                            by_pass: attempt.by_pass, at: attempt.at })
+                    else
+                        plan = shrink.reject(plan, attempt)
+    let best = shrink.best_of(plan)
+    let (v, _) = strategy.draw_with(g, tape.replay_of(best))
+    propcheck.failure(seed, best, v, why, cases, shrink.shrinks_of(plan))
+
+// `shrink_pure` for a property that performs.
+//
+// The same walk, with the same two stops; see `shrink_pure`.
+fn shrink_io<T>(g: PropStrategy<T>, prop: fn(T) -> PropCheck [io], cfg: PropConfig, seed: Int,
+                why: Str, cases: Int, choices: [Int]) -> PropFailure<T> [io]
+    var plan = shrink.plan_from(choices)
+    var walking = true
+    while walking
+        if shrink.tried_of(plan) >= cfg.max_shrinks
+            walking = false
+        else
+            match shrink.next_try(plan)
+                None          =>
+                    walking = false
+                Some(attempt) =>
+                    if same_bug(outcome_of_io(g, prop, tape.replay_of(attempt.candidate)), why)
+                        plan = shrink.keep(plan, ShrinkTry {
+                            candidate: consumed(g, attempt.candidate),
+                            by_pass: attempt.by_pass, at: attempt.at })
+                    else
+                        plan = shrink.reject(plan, attempt)
+    let best = shrink.best_of(plan)
+    let (v, _) = strategy.draw_with(g, tape.replay_of(best))
+    propcheck.failure(seed, best, v, why, cases, shrink.shrinks_of(plan))
+
+// The verdict a finished case loop answers: a failure shrunk, or a
+// pass, or an exhaustion.
+fn verdict_pure<T>(g: PropStrategy<T>, prop: fn(T) -> PropCheck, cfg: PropConfig, seed: Int,
+                   t: Tally<T>) -> PropVerdict<T>
+    match t.hit
+        Some(f) =>
+            let v: PropVerdict<T> = verdict.failed(
+                shrink_pure(g, prop, cfg, seed, f.why, f.cases, f.choices))
+            v
+        None    =>
+            let v: PropVerdict<T> = verdict_of(t, cfg, seed)
+            v
+
+// `verdict_pure` for a property that performs.
+fn verdict_io<T>(g: PropStrategy<T>, prop: fn(T) -> PropCheck [io], cfg: PropConfig, seed: Int,
+                 t: Tally<T>) -> PropVerdict<T> [io]
+    match t.hit
+        Some(f) =>
+            let v: PropVerdict<T> = verdict.failed(
+                shrink_io(g, prop, cfg, seed, f.why, f.cases, f.choices))
+            v
+        None    =>
+            let v: PropVerdict<T> = verdict_of(t, cfg, seed)
+            v
+
+// The whole run at a seed the caller supplied, drawing nothing.
+//
+// The one case loop both `check` and `check_seeded` are written on,
+// which is what makes the second one honest about its empty row: the
+// only thing `check` adds is the seed draw in front of this call.
+fn check_at<T>(g: PropStrategy<T>, cfg: PropConfig, seed: Int,
+               prop: fn(T) -> PropCheck) -> PropVerdict<T>
+    verdict_pure(g, prop, cfg, seed, scan(g, cfg, seed, prop))
+
+// One line from a rendered value, the author's reason and the replay
+// line.
+//
+// An empty rendering is a caller saying "this type has no short
+// spelling", which the README allows, so the value and its separator
+// are left out entirely rather than leaving a line that opens with a
+// dash.
+fn shown_case(shown: Str, why: Str, seed: Int, choices: [Int]) -> Str
+    if shown == ""
+        return "${why} (${propcheck.replay_line(seed, choices)})"
+    "${shown} — ${why} (${propcheck.replay_line(seed, choices)})"
 
 // **Run a property.**
 //
@@ -147,7 +513,8 @@ pub fn with_case_file(cfg: PropConfig, path: Str) -> PropConfig
 // ```
 pub fn check<T>(g: PropStrategy<T>, cfg: PropConfig,
                 prop: fn(T) -> PropCheck) -> PropVerdict<T> [fs, rand]
-    todo("proptest-nv.runner.check")
+    let seed = seedsrc.seed_for(cfg)
+    check_at(g, cfg, seed, prop)
 
 // The same, for a property that performs.
 //
@@ -176,7 +543,8 @@ pub fn check<T>(g: PropStrategy<T>, cfg: PropConfig,
 // ```
 pub fn check_io<T>(g: PropStrategy<T>, cfg: PropConfig,
                    prop: fn(T) -> PropCheck [io]) -> PropVerdict<T> [fs, rand, io]
-    todo("proptest-nv.runner.check_io")
+    let seed = seedsrc.seed_for(cfg)
+    verdict_io(g, prop, cfg, seed, scan_io(g, cfg, seed, prop))
 
 // **Reproduce one recorded case.  No effects at all.**
 //
@@ -201,7 +569,19 @@ pub fn check_io<T>(g: PropStrategy<T>, cfg: PropConfig,
 //                   xs => propcheck.holds_if(list.len(xs) < 3, "too long"))
 // ```
 pub fn replay<T>(g: PropStrategy<T>, choices: [Int], prop: fn(T) -> PropCheck) -> PropVerdict<T>
-    todo("proptest-nv.runner.replay")
+    let (v, t) = strategy.draw_with(g, tape.replay_of(choices))
+    if tape.is_overrun(t)
+        return verdict.exhausted(0, 1, 0)
+    // Bound first, as in `outcome_of`; see the comment there.
+    let c = prop(v)
+    match c
+        PropHolds      =>
+            return verdict.passed(1, 0)
+        PropSkip       =>
+            return verdict.exhausted(0, 1, 0)
+        PropBroke(why) =>
+            return verdict.failed(
+                              propcheck.failure(0, tape.choices_of(t), v, why, 1, 0))
 
 // Reproduce one case from a seed rather than a transcript.
 //
@@ -221,7 +601,7 @@ pub fn replay<T>(g: PropStrategy<T>, choices: [Int], prop: fn(T) -> PropCheck) -
 // ```
 pub fn check_seeded<T>(g: PropStrategy<T>, cfg: PropConfig, seed: Int,
                        prop: fn(T) -> PropCheck) -> PropVerdict<T>
-    todo("proptest-nv.runner.check_seeded")
+    check_at(g, cfg, seed, prop)
 
 // **Run a property as a `@test` assertion.**
 //
@@ -233,7 +613,7 @@ pub fn check_seeded<T>(g: PropStrategy<T>, cfg: PropConfig, seed: Int,
 // ```text
 //   ✗ test_reverse_is_an_involution
 //       reverse_tests.nv:14:8: case reverse twice: [1, 0] — not an
-//       involution (seed 8134502219, choices 2,1,0)
+//       involution (seed 8134502219 choices 2,1,0)
 // ```
 //
 // `show` is required and is not an oversight: `T` is generic, there is
@@ -268,7 +648,7 @@ pub fn check_seeded<T>(g: PropStrategy<T>, cfg: PropConfig, seed: Int,
 // ```
 pub fn check_test<T>(label: Str, g: PropStrategy<T>, cfg: PropConfig, prop: fn(T) -> PropCheck,
                      show: fn(T) -> Str) [fs, rand]
-    todo("proptest-nv.runner.check_test")
+    report_test(label, check(g, cfg, prop), show)
 
 // The same, reported without running: a verdict a caller already has,
 // turned into a `std.test` result.
@@ -286,7 +666,9 @@ pub fn check_test<T>(label: Str, g: PropStrategy<T>, cfg: PropConfig, prop: fn(T
 //     runner.report_test("the recorded case", v, n => "${n}")
 // ```
 pub fn report_test<T>(label: Str, v: PropVerdict<T>, show: fn(T) -> Str)
-    todo("proptest-nv.runner.report_test")
+    test.case(label)
+    if not verdict.held(v)
+        test.fail(message_for(v, show))
 
 // The message `check_test` would produce for a verdict.
 //
@@ -303,4 +685,6 @@ pub fn report_test<T>(label: Str, v: PropVerdict<T>, show: fn(T) -> Str)
 //     runner.message_for(v, n => "${n}")
 // ```
 pub fn message_for<T>(v: PropVerdict<T>, show: fn(T) -> Str) -> Str
-    todo("proptest-nv.runner.message_for")
+    match verdict.failure_of(v)
+        Some(f) => shown_case(show(f.value), f.why, f.seed, f.choices)
+        None    => verdict.render(v)
