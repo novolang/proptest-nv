@@ -24,6 +24,7 @@
 // and the pair is refused as a cycle
 // (language/a-package-module-resolves-a-sibling-s-name-that-it-cannot-import).
 use rng
+use runner
 
 // A seed from the operating system's entropy, or `None`.
 //
